@@ -73,11 +73,18 @@ class WebSearchTool:
 
 
 def _platform() -> str:
+    if sys.platform == "win32":
+        return "win32"
     if sys.platform == "darwin":
         return "darwin"
     if sys.platform.startswith("linux"):
         return "linux"
-    return "win32"
+    return sys.platform
+
+
+def _truncate_stream(value: str | None) -> str:
+    value = value or ""
+    return "[...]truncado[...]" + value[-1500:] if len(value) > 1500 else value
 
 
 class LocalCommandTool:
@@ -109,20 +116,29 @@ class LocalCommandTool:
     def _resolve(self, action: str, target: str):
         if action == "run_script":
             entry = self._scripts.get(target)
-        else:
+        elif action in ("open_app", "close_app"):
             verb = "open" if action == "open_app" else "close"
             entry = (self._apps.get(target) or {}).get(verb)
+        else:
+            entry = None
         return entry.get(_platform()) if entry else None
 
     def run(self, action: str, target: str) -> str:
+        if action == "close_app" and target == "navegador" and _platform() == "win32":
+            return (f"Comando '{action} {target}' não suportado no Windows. "
+                    f"Disponíveis:\n{self.catalog()}")
+
         argv = self._resolve(action, target)
         if argv is None:
             # Erro com o catálogo permite o LLM se autocorrigir na próxima tentativa
             return (f"Comando '{action} {target}' não cadastrado para este SO. "
                     f"Disponíveis:\n{self.catalog()}")
         if action == "run_script":
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
-            out = (proc.stdout or proc.stderr).strip()
-            return out[-1500:] if out else f"script '{target}' finalizado (exit {proc.returncode})."
-        subprocess.Popen(argv)  # fire-and-forget: abrir/fechar app não bloqueia a conversa
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=120, shell=False)
+            stdout = _truncate_stream(proc.stdout)
+            stderr = _truncate_stream(proc.stderr)
+            if stdout and stderr:
+                return f"stdout:\n{stdout}\nstderr:\n{stderr}"
+            return stdout or stderr or f"script '{target}' finalizado (exit {proc.returncode})."
+        subprocess.Popen(argv, shell=False)  # fire-and-forget: abrir/fechar app não bloqueia a conversa
         return f"ok: {action} {target}"

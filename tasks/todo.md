@@ -8,7 +8,7 @@
 
 ## Phase 2: Tools e áudio
 
-- [ ] Task 3: Allowlist de comandos locais
+- [x] Task 3: Allowlist de comandos locais
 - [ ] Task 4: Busca web via Tavily
 - [ ] Task 5: Captura, playback, hotkey e VAD
 - [ ] Checkpoint: Tools e áudio básico
