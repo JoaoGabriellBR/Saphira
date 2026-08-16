@@ -1,11 +1,46 @@
 """Checks mínimos das partes puras da Saphira (sem frameworks).
 Rodar: python tests/test_core.py
 """
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# --- config: valores do v1 e fail-fast sem chaves reais ---
+ROOT = Path(__file__).resolve().parents[1]
+REQUIRED = ["ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID",
+            "TAVILY_API_KEY", "GEMINI_API_KEY"]
+for k in REQUIRED:
+    os.environ[k] = f"test-{k.lower()}"  # setado antes do import: .env não sobrescreve
+for opt in ("CLAUDE_MODEL", "SAPHIRA_HOTKEY"):
+    os.environ.pop(opt, None)
+
+from saphira import config
+
+assert config.CLAUDE_MODEL == "claude-sonnet-5", config.CLAUDE_MODEL
+assert config.GEMINI_API_KEY == "test-gemini_api_key"
+assert config.STT_MODEL == "scribe_v2"
+assert config.TTS_MODEL == "eleven_flash_v2_5"
+assert config.LANGUAGE == "por"
+assert config.HOTKEY == "<f9>"
+assert config.MAX_HISTORY_MESSAGES == 20
+
+# qualquer obrigatória ausente -> RuntimeError nomeando a variável e .env.example
+for missing in REQUIRED:
+    env = {**os.environ, missing: "", "PYTHONPATH": str(ROOT)}  # "" impede .env de preencher
+    r = subprocess.run([sys.executable, "-c", "import saphira.config"],
+                       env=env, cwd=tempfile.gettempdir(), capture_output=True, text=True)
+    assert r.returncode != 0 and missing in r.stderr and ".env.example" in r.stderr, (missing, r.stderr)
+
+# dependências declaradas e .env.example sem valores preenchidos
+assert "google-genai" in (ROOT / "requirements.txt").read_text(encoding="utf-8")
+for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
+    line = line.strip()
+    if line and not line.startswith("#"):
+        assert line.split("=", 1)[1].split("#", 1)[0].strip() == "", f"valor no .env.example: {line}"
 
 from saphira.llm import _pop_sentences
 from saphira.tools import LocalCommandTool, ToolRegistry

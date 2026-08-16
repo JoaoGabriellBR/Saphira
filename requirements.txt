@@ -3,6 +3,7 @@
 # congele com: pip freeze > requirements-lock.txt
 elevenlabs        # STT (Scribe) + TTS streaming
 anthropic         # Claude com tool use
+google-genai      # Gemini (fallback LLM)
 tavily-python     # busca web
 sounddevice       # captura/playback de áudio (requer PortAudio no sistema)
 numpy             # dependência do sounddevice

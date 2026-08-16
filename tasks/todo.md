@@ -2,7 +2,7 @@
 
 ## Phase 1: Foundation
 
-- [ ] Task 1: Configuração e dependências do runtime
+- [x] Task 1: Configuração e dependências do runtime
 - [ ] Task 2: Registry comum de tools
 - [ ] Checkpoint: Foundation
 
