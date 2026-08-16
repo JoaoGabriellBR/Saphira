@@ -1,0 +1,29 @@
+# Registro de comandos locais da Saphira (allowlist — só o que está aqui executa).
+# Cada entrada define o argv por SO: darwin (macOS), linux e/ou win32.
+# Adicione seus próprios apps/scripts; o catálogo vai automaticamente ao system prompt.
+
+apps:
+  spotify:
+    open:
+      darwin: ["open", "-a", "Spotify"]
+      linux: ["gtk-launch", "spotify"]
+      win32: ["cmd", "/c", "start", "spotify:"]
+    close:
+      darwin: ["osascript", "-e", "quit app \"Spotify\""]
+      linux: ["pkill", "-x", "spotify"]
+      win32: ["taskkill", "/IM", "Spotify.exe", "/F"]
+  navegador:
+    open:
+      darwin: ["open", "-a", "Safari"]
+      linux: ["xdg-open", "https://google.com"]
+      win32: ["cmd", "/c", "start", "https://google.com"]
+    close:
+      darwin: ["osascript", "-e", "quit app \"Safari\""]
+      linux: ["pkill", "-f", "firefox"]
+
+scripts:
+  # Script de demo para o teste de aceite (assume daemon rodando na raiz do repo).
+  ola:
+    win32: ["python", "scripts/ola.py"]
+    darwin: ["python3", "scripts/ola.py"]
+    linux: ["python3", "scripts/ola.py"]

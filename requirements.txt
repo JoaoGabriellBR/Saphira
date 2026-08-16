@@ -1,0 +1,11 @@
+# Saphira v1 — rode: pip install -r requirements.txt
+# Versões não pinadas de propósito (APIs mudam rápido); após o primeiro run OK,
+# congele com: pip freeze > requirements-lock.txt
+elevenlabs        # STT (Scribe) + TTS streaming
+anthropic         # Claude com tool use
+tavily-python     # busca web
+sounddevice       # captura/playback de áudio (requer PortAudio no sistema)
+numpy             # dependência do sounddevice
+pynput            # hotkey global (push-to-talk)
+python-dotenv     # .env
+PyYAML            # commands.yaml
