@@ -1,6 +1,7 @@
 """Checks mínimos das partes puras da Saphira (sem frameworks).
 Rodar: python tests/test_core.py
 """
+import logging
 import os
 import subprocess
 import sys
@@ -76,7 +77,15 @@ assert tool.run("run_script", "ola").strip() == "oi saphira"
 assert "não cadastrado" in tool.run("open_app", "inexistente")
 assert "não cadastrado" in tool.run("close_app", "editor")  # só 'open' foi definido
 
-# --- registry: erro de tool nunca derruba a conversa ---
+# --- registry: sucesso, schemas, erro protegido, catálogo e log ---
+class Ok:
+    name = "ok"
+    description = "tool fake de sucesso"
+    input_schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
+
+    def run(self, x: int) -> str:
+        return f"recebido {x}"
+
 class Quebrada:
     name = "quebrada"
     description = "x"
@@ -86,8 +95,34 @@ class Quebrada:
         raise RuntimeError("boom")
 
 reg = ToolRegistry()
+reg.register(Ok())
 reg.register(Quebrada())
-assert "Erro ao executar quebrada" in reg.execute("quebrada", {})
-assert "não registrada" in reg.execute("fantasma", {})
+
+# tool registrada expõe name/description/input_schema e execute retorna str
+schema = next(s for s in reg.anthropic_schemas() if s["name"] == "ok")
+assert schema["description"] == "tool fake de sucesso"
+assert schema["input_schema"]["properties"]["x"]["type"] == "integer"
+assert reg.execute("ok", {"x": 7}) == "recebido 7"
+
+# exceção vira erro com detalhe sem escapar; fantasma recebe o catálogo completo
+assert reg.execute("quebrada", {}) == "Erro ao executar quebrada: boom"
+r = reg.execute("fantasma", {})
+assert "não registrada" in r and "ok" in r and "quebrada" in r, r
+
+# execução bem-sucedida registra tool, args e duração em milissegundos
+class ListHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+tool_log = logging.getLogger("saphira.tools")
+tool_log.setLevel(logging.INFO)
+handler = ListHandler()
+tool_log.addHandler(handler)
+reg.execute("ok", {"x": 7})
+assert any("tool=ok" in m and "'x': 7" in m and "ms" in m for m in handler.messages), handler.messages
 
 print("todos os checks passaram")
