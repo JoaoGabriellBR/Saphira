@@ -27,7 +27,7 @@
 
 - [x] Task 12: Worker de fala frase a frase
 - [x] Task 13: Eventos e métricas de latência
-- [ ] Task 14: Loop PTT para turno normal
+- [x] Task 14: Loop PTT para turno normal
 - [ ] Task 15: Barge-in com cancelamento e retomada
 - [ ] Task 16: Degradação de voz
 - [ ] Task 17: Degradação de raciocínio e tools

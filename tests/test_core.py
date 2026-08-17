@@ -888,6 +888,143 @@ assert round(snapshot["ttfa_ms"], 2) == 20.0
 assert round(snapshot["p50_ms"], 2) == 10.5
 assert round(snapshot["p95_ms"], 2) == 19.05
 
+# --- loop PTT para turno normal ---
+class FakeTurnSpeech:
+    def __init__(self, text="resposta transcrita", error=None):
+        self.text = text
+        self.error = error
+        self.transcribe_calls = []
+        self.synthesize_calls = []
+
+    def transcribe(self, pcm):
+        self.transcribe_calls.append(pcm)
+        if self.error:
+            raise self.error
+        return self.text
+
+    def synthesize_stream(self, text):
+        self.synthesize_calls.append(text)
+        return [b"pcm da resposta"]
+
+
+class FakeTurnBrain:
+    def __init__(self):
+        self.calls = []
+
+    def respond(self, text, on_sentence):
+        self.calls.append(text)
+        on_sentence("Resposta factual.")
+
+
+turn_playback = []
+
+
+def fake_turn_play(chunks, interrupt, on_first_chunk=None):
+    for chunk in chunks:
+        if interrupt.is_set():
+            return
+        turn_playback.append(chunk)
+        if on_first_chunk:
+            on_first_chunk()
+
+
+turn_speech = FakeTurnSpeech()
+turn_brain = FakeTurnBrain()
+turn_latency = main_module.LatencyMetrics(clock=lambda: 2.0)
+turn_latency.capture_finished(at=1.0)
+old_turn_play = main_module.audio.play_pcm
+main_module.audio.play_pcm = fake_turn_play
+try:
+    assert main_module.run_turn(b"pcm" * 1100, turn_speech, turn_brain, turn_latency)
+finally:
+    main_module.audio.play_pcm = old_turn_play
+
+assert turn_speech.transcribe_calls == [b"pcm" * 1100]
+assert turn_brain.calls == ["resposta transcrita"]
+assert turn_speech.synthesize_calls == ["Resposta factual."]
+assert turn_playback == [b"pcm da resposta"]
+
+short_speech = FakeTurnSpeech()
+assert not main_module.run_turn(b"x" * 3199, short_speech, FakeTurnBrain(), turn_latency)
+assert short_speech.transcribe_calls == []
+
+recoveries = []
+old_say = main_module.say
+main_module.say = lambda speech, text: recoveries.append(text)
+try:
+    empty_speech = FakeTurnSpeech(text="")
+    failed_speech = FakeTurnSpeech(error=RuntimeError("STT fora do ar"))
+    assert not main_module.run_turn(b"x" * 3200, empty_speech, FakeTurnBrain(), turn_latency)
+    assert not main_module.run_turn(b"x" * 3200, failed_speech, FakeTurnBrain(), turn_latency)
+finally:
+    main_module.say = old_say
+assert recoveries == ["Não entendi. Pode repetir?", "Não consegui te ouvir agora. Tenta de novo?"]
+
+
+class StopPttLoop(Exception):
+    pass
+
+
+class FakePttEvent:
+    def __init__(self):
+        self.wait_calls = 0
+        self.clear_calls = 0
+        self._set = False
+
+    def clear(self):
+        self.clear_calls += 1
+        self._set = False
+
+    def is_set(self):
+        return self._set
+
+    def set(self):
+        self._set = True
+
+    def wait(self):
+        self.wait_calls += 1
+        if self.wait_calls == 1:
+            self.set()
+            return True
+        raise StopPttLoop
+
+
+ptt_event = FakePttEvent()
+ptt_speech = FakeTurnSpeech()
+ptt_brain = FakeTurnBrain()
+record_stops = []
+old_record_until = main_module.audio.record_until
+old_turn_play = main_module.audio.play_pcm
+
+
+def fake_record_until(stop):
+    record_stops.append(stop)
+    stop.set()  # segunda ativação encerra a captura
+    return b"x" * 3200
+
+
+main_module.audio.record_until = fake_record_until
+main_module.audio.play_pcm = fake_turn_play
+try:
+    try:
+        main_module.run_ptt_loop(
+            ptt_speech,
+            ptt_brain,
+            ptt_event,
+            main_module.LatencyMetrics(clock=lambda: 2.0),
+        )
+    except StopPttLoop:
+        pass
+finally:
+    main_module.audio.record_until = old_record_until
+    main_module.audio.play_pcm = old_turn_play
+
+assert ptt_event.wait_calls == 2
+assert len(record_stops) == 1 and record_stops[0] is ptt_event
+assert not ptt_event.is_set()
+assert ptt_speech.transcribe_calls == [b"x" * 3200]
+assert ptt_brain.calls == ["resposta transcrita"]
+
 # --- LocalCommandTool ---
 plat = "win32" if sys.platform == "win32" else ("darwin" if sys.platform == "darwin" else "linux")
 py = "python" if plat == "win32" else "python3"

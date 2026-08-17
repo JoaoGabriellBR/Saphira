@@ -95,6 +95,62 @@ def say(speech: Speech, text: str) -> None:
         log.warning("TTS indisponível; mensagem só em texto: %s", text)
 
 
+def run_turn(pcm: bytes, speech: Speech, brain: ClaudeBrain,
+             latency: LatencyMetrics, interrupt: threading.Event | None = None) -> bool:
+    if len(pcm) < 3200:  # < 100ms de áudio = toque acidental
+        return False
+
+    try:
+        text = timed("stt", speech.transcribe, pcm)
+    except Exception:
+        log.exception("STT falhou")
+        say(speech, "Não consegui te ouvir agora. Tenta de novo?")
+        return False
+    if not text:
+        say(speech, "Não entendi. Pode repetir?")
+        return False
+    log.info("ouvido: %r", text)
+
+    sentences: queue.Queue = queue.Queue()
+    interrupt = interrupt or threading.Event()
+    speaker = threading.Thread(
+        target=speaker_worker,
+        args=(sentences, speech, interrupt),
+        kwargs={"on_first_audio": latency.first_audio},
+        daemon=True,
+    )
+    speaker.start()
+
+    def enqueue(sentence: str) -> None:
+        log.info("saphira: %s", sentence)
+        sentences.put(sentence)
+
+    try:
+        brain.respond(text, on_sentence=enqueue)
+    except Exception:
+        log.exception("LLM falhou")
+        sentences.put("Tive um problema para processar agora. Tenta de novo em instantes.")
+    finally:
+        sentences.put(None)
+    speaker.join()
+    return True
+
+
+def run_ptt_loop(speech: Speech, brain: ClaudeBrain, hotkey_event,
+                 latency: LatencyMetrics | None = None) -> None:
+    latency = latency or LatencyMetrics()
+    while True:
+        hotkey_event.clear()
+        hotkey_event.wait()  # 1ª ativação: começa a captura
+        hotkey_event.clear()
+
+        latency.capture_started()
+        pcm = timed("gravacao", audio.record_until, hotkey_event)
+        latency.capture_finished()
+        hotkey_event.clear()  # 2ª ativação não pode cancelar o turno normal
+        run_turn(pcm, speech, brain, latency, interrupt=hotkey_event)
+
+
 def speaker_worker(q: queue.Queue, speech: Speech, interrupt: threading.Event,
                    on_first_audio=None) -> None:
     """Consome frases → sintetiza → toca; sentinela None encerra."""
@@ -154,49 +210,8 @@ def main() -> None:
     log.info("Saphira pronta. Hotkey %s: 1ª vez = falar, 2ª = enviar; durante a fala = interromper",
              config.HOTKEY)
 
-    go_listen = False  # após barge-in, volta direto a escutar
     try:
-        while True:
-            hotkey_event.clear()
-            if not go_listen:
-                hotkey_event.wait()  # dorme até a hotkey
-                hotkey_event.clear()
-            go_listen = False
-
-            latency.capture_started()
-            pcm = timed("gravacao", audio.record_until, hotkey_event)
-            latency.capture_finished()
-            if len(pcm) < 3200:  # < 100ms de áudio = toque acidental
-                continue
-
-            try:
-                text = timed("stt", speech.transcribe, pcm)
-            except Exception:
-                log.exception("STT falhou")
-                say(speech, "Não consegui te ouvir agora. Tenta de novo?")
-                continue
-            if not text:
-                say(speech, "Não entendi. Pode repetir?")
-                continue
-            log.info("ouvido: %r", text)
-
-            q: queue.Queue = queue.Queue()
-            interrupt = hotkey_event  # hotkey durante a fala = barge-in
-            speaker = threading.Thread(target=speaker_worker,
-                                       args=(q, speech, interrupt),
-                                       kwargs={"on_first_audio": latency.first_audio},
-                                       daemon=True)
-            speaker.start()
-            try:
-                brain.respond(text, on_sentence=lambda s: (log.info("saphira: %s", s), q.put(s)))
-            except Exception:
-                log.exception("LLM falhou")
-                q.put("Tive um problema para processar agora. Tenta de novo em instantes.")
-            finally:
-                q.put(None)
-            speaker.join()
-            if interrupt.is_set():
-                go_listen = True
+        run_ptt_loop(speech, brain, hotkey_event, latency)
     except KeyboardInterrupt:
         pass
     finally:
