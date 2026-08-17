@@ -13,7 +13,7 @@ import time
 
 from . import audio, config
 from .llm import ClaudeBrain
-from .speech import Speech, local_fallback_chunks
+from .speech import LOCAL_FALLBACK_MESSAGE, Speech, local_fallback_chunks
 from .tools import LocalCommandTool, ToolRegistry, WebSearchTool
 
 log = logging.getLogger("saphira")
@@ -87,12 +87,27 @@ def timed(label: str, fn, *args, **kwargs):
     return out
 
 
+def play_local_fallback(interrupt: threading.Event, on_first_chunk=None) -> bool:
+    log.warning("usando fallback local: %s", LOCAL_FALLBACK_MESSAGE)
+    try:
+        chunks = local_fallback_chunks()
+        if on_first_chunk:
+            audio.play_pcm(chunks, interrupt, on_first_chunk=on_first_chunk)
+        else:
+            audio.play_pcm(chunks, interrupt)
+    except Exception:
+        log.exception("fallback local indisponível; mensagem: %s", LOCAL_FALLBACK_MESSAGE)
+        return False
+    return True
+
+
 def say(speech: Speech, text: str) -> None:
-    """Mensagem de voz com fallback em texto se o TTS estiver fora do ar."""
+    """Mensagem de voz com fallback local se o TTS estiver fora do ar."""
     try:
         audio.play_pcm(speech.synthesize_stream(text), threading.Event())
     except Exception:
-        log.warning("TTS indisponível; mensagem só em texto: %s", text)
+        log.warning("TTS indisponível; usando fallback local para: %s", text)
+        play_local_fallback(threading.Event())
 
 
 def run_turn(pcm: bytes, speech: Speech, brain: ClaudeBrain,
@@ -223,10 +238,10 @@ def speaker_worker(q: queue.Queue, speech: Speech, interrupt: threading.Event,
             if interrupt.is_set():
                 continue
             log.exception("TTS falhou; usando fallback local: %r", sentence)
-            try:
-                play(local_fallback_chunks())
-            except Exception:
-                log.exception("fallback de áudio local falhou")
+            play_local_fallback(
+                interrupt,
+                mark_first_audio if on_first_audio else None,
+            )
 
 
 def main() -> None:

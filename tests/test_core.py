@@ -881,6 +881,145 @@ assert worker_speech.calls == ["falha", "ok"]
 assert worker_played == [b"fallback", b"ok-1", b"ok-2"]
 assert worker_first_audio == ["audio"]
 
+# --- degradação de voz ---
+class FailingTtsSpeech:
+    def __init__(self):
+        self.calls = []
+
+    def synthesize_stream(self, text):
+        self.calls.append(text)
+        raise RuntimeError("ElevenLabs indisponível")
+
+
+fallback_log_messages = []
+
+
+class FallbackLogHandler(logging.Handler):
+    def __init__(self, messages):
+        super().__init__()
+        self.messages = messages
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+fallback_handler = FallbackLogHandler(fallback_log_messages)
+fallback_log = logging.getLogger("saphira")
+fallback_log.setLevel(logging.INFO)
+fallback_log.addHandler(fallback_handler)
+local_audio = []
+old_fallback_play = main_module.audio.play_pcm
+old_fallback_chunks = main_module.local_fallback_chunks
+
+
+def fake_local_play(chunks, interrupt, on_first_chunk=None):
+    local_audio.extend(chunks)
+
+
+main_module.audio.play_pcm = fake_local_play
+main_module.local_fallback_chunks = lambda: iter([b"audio local"])
+try:
+    failing_tts = FailingTtsSpeech()
+    main_module.say(failing_tts, "mensagem fixa")
+finally:
+    main_module.audio.play_pcm = old_fallback_play
+    main_module.local_fallback_chunks = old_fallback_chunks
+    fallback_log.removeHandler(fallback_handler)
+
+assert failing_tts.calls == ["mensagem fixa"]
+assert local_audio == [b"audio local"]
+
+class FailingSttSpeech(FailingTtsSpeech):
+    def transcribe(self, pcm):
+        raise RuntimeError("Scribe indisponível")
+
+
+stt_local_audio = []
+old_fallback_play = main_module.audio.play_pcm
+old_fallback_chunks = main_module.local_fallback_chunks
+
+
+def fake_stt_fallback_play(chunks, interrupt, on_first_chunk=None):
+    stt_local_audio.extend(chunks)
+
+
+main_module.audio.play_pcm = fake_stt_fallback_play
+main_module.local_fallback_chunks = lambda: iter([b"audio local STT"])
+stt_latency = main_module.LatencyMetrics(clock=lambda: 2.0)
+stt_latency.capture_finished(at=1.0)
+try:
+    assert not main_module.run_turn(
+        b"x" * 3200,
+        FailingSttSpeech(),
+        None,
+        stt_latency,
+    )
+finally:
+    main_module.audio.play_pcm = old_fallback_play
+    main_module.local_fallback_chunks = old_fallback_chunks
+assert stt_local_audio == [b"audio local STT"]
+
+failed_fallback_logs = []
+failed_fallback_handler = FallbackLogHandler(failed_fallback_logs)
+fallback_log.addHandler(failed_fallback_handler)
+old_fallback_play = main_module.audio.play_pcm
+old_fallback_chunks = main_module.local_fallback_chunks
+
+
+def unavailable_audio(*args, **kwargs):
+    raise RuntimeError("sink indisponível")
+
+
+main_module.audio.play_pcm = unavailable_audio
+main_module.local_fallback_chunks = lambda: iter([b"sem saida"])
+try:
+    main_module.say(FailingTtsSpeech(), "sem voz")
+finally:
+    main_module.audio.play_pcm = old_fallback_play
+    main_module.local_fallback_chunks = old_fallback_chunks
+    fallback_log.removeHandler(failed_fallback_handler)
+assert any("fallback local" in message and speech_module.LOCAL_FALLBACK_MESSAGE in message
+           for message in failed_fallback_logs)
+
+
+class MidResponseSpeech:
+    def __init__(self):
+        self.calls = []
+
+    def synthesize_stream(self, text):
+        self.calls.append(text)
+        return [text.encode()]
+
+
+mid_speech = MidResponseSpeech()
+mid_play_calls = 0
+mid_played = []
+
+
+def fail_first_play(chunks, interrupt, on_first_chunk=None):
+    global mid_play_calls
+    mid_play_calls += 1
+    if mid_play_calls == 1:
+        raise RuntimeError("TTS caiu durante playback")
+    mid_played.extend(chunks)
+
+
+old_mid_play = main_module.audio.play_pcm
+old_mid_fallback = main_module.local_fallback_chunks
+main_module.audio.play_pcm = fail_first_play
+main_module.local_fallback_chunks = lambda: iter([b"fallback local"])
+try:
+    mid_queue = queue.Queue()
+    mid_queue.put("primeira")
+    mid_queue.put("segunda")
+    mid_queue.put(None)
+    main_module.speaker_worker(mid_queue, mid_speech, threading.Event())
+finally:
+    main_module.audio.play_pcm = old_mid_play
+    main_module.local_fallback_chunks = old_mid_fallback
+assert mid_speech.calls == ["primeira", "segunda"]
+assert mid_played == [b"fallback local", b"segunda"]
+
 # --- eventos e métricas de latência ---
 latency_messages = []
 
