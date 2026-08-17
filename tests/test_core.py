@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -43,6 +44,7 @@ for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
     if line and not line.startswith("#"):
         assert line.split("=", 1)[1].split("#", 1)[0].strip() == "", f"valor no .env.example: {line}"
 
+from saphira import audio as audio_module
 from saphira import tools as tools_module
 from saphira.llm import _pop_sentences
 from saphira.tools import LocalCommandTool, ToolRegistry
@@ -104,6 +106,159 @@ try:
         "Erro ao executar web_search: timeout Tavily"
 finally:
     tools_module.TavilyClient = old_tavily
+
+# --- áudio: captura, playback, hotkey e VAD ---
+stop = threading.Event()
+input_streams = []
+
+
+class FakeInputStream:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        input_streams.append(self)
+
+    def __enter__(self):
+        stop.set()
+        try:
+            self.kwargs["callback"](b"\x01\x02", 1, None, None)
+        except audio_module.sd.CallbackStop:
+            pass
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+old_input_stream = audio_module.sd.RawInputStream
+audio_module.sd.RawInputStream = FakeInputStream
+try:
+    captured = audio_module.record_until(stop)
+finally:
+    audio_module.sd.RawInputStream = old_input_stream
+
+assert captured == b"\x01\x02"
+assert input_streams[0].kwargs["samplerate"] == 16000
+assert input_streams[0].kwargs["channels"] == 1
+assert input_streams[0].kwargs["dtype"] == "int16"
+
+timeouts = []
+
+
+class FakeDone:
+    def set(self):
+        pass
+
+    def wait(self, timeout):
+        timeouts.append(timeout)
+        return False
+
+
+class IdleInputStream:
+    def __init__(self, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+old_event = audio_module.threading.Event
+old_input_stream = audio_module.sd.RawInputStream
+audio_module.threading.Event = lambda: FakeDone()
+audio_module.sd.RawInputStream = IdleInputStream
+try:
+    assert audio_module.record_until(type("NeverStop", (), {"is_set": lambda self: False})(), 999) == b""
+finally:
+    audio_module.threading.Event = old_event
+    audio_module.sd.RawInputStream = old_input_stream
+assert timeouts == [90]
+
+writes = []
+interrupt = threading.Event()
+output_streams = []
+
+
+class FakeOutputStream:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        output_streams.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def write(self, chunk):
+        writes.append(chunk)
+        interrupt.set()
+
+
+old_output_stream = audio_module.sd.RawOutputStream
+audio_module.sd.RawOutputStream = FakeOutputStream
+try:
+    audio_module.play_pcm([b"primeiro", b"descartado"], interrupt)
+finally:
+    audio_module.sd.RawOutputStream = old_output_stream
+
+assert writes == [b"primeiro"]
+assert output_streams[0].kwargs == {"samplerate": 24000, "channels": 1, "dtype": "int16"}
+
+hotkey_calls = []
+listeners = []
+
+
+class FakeGlobalHotKeys:
+    def __init__(self, mapping):
+        self.mapping = mapping
+        self.started = False
+        self.stopped = False
+        listeners.append(self)
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def press(self, combo):
+        self.mapping[combo]()
+
+
+old_global_hotkeys = audio_module.keyboard.GlobalHotKeys
+audio_module.keyboard.GlobalHotKeys = FakeGlobalHotKeys
+try:
+    hotkey = audio_module.Hotkey("<f9>", lambda: hotkey_calls.append("pressed"))
+    assert hotkey_calls == []
+    hotkey.start()
+    listeners[0].press("<f9>")
+    hotkey.stop()
+finally:
+    audio_module.keyboard.GlobalHotKeys = old_global_hotkeys
+assert hotkey_calls == ["pressed"]
+assert listeners[0].started and listeners[0].stopped
+
+vad_events = []
+vad = audio_module.VAD(lambda: vad_events.append("speech"), debounce_ms=200)
+vad.signal(True, now=0.0)
+vad.signal(True, now=0.199)
+assert vad_events == []
+vad.signal(True, now=0.201)
+vad.signal(True, now=0.4)
+assert vad_events == ["speech"]
+vad.signal(False, now=0.5)
+vad.signal(True, now=1.0)
+vad.signal(True, now=1.201)
+assert vad_events == ["speech", "speech"]
+for invalid_debounce in (149, 301):
+    try:
+        audio_module.VAD(lambda: None, debounce_ms=invalid_debounce)
+    except ValueError:
+        pass
+    else:
+        assert False, invalid_debounce
 
 # --- LocalCommandTool ---
 plat = "win32" if sys.platform == "win32" else ("darwin" if sys.platform == "darwin" else "linux")

@@ -1,6 +1,7 @@
 """Captura de microfone, playback PCM e hotkey global (push-to-talk)."""
 import logging
 import threading
+import time
 
 import sounddevice as sd
 from pynput import keyboard
@@ -37,7 +38,7 @@ def record_until(stop: threading.Event, max_seconds: int = 90) -> bytes:
 
     with sd.RawInputStream(samplerate=MIC_RATE, channels=1, dtype="int16",
                            blocksize=4096, callback=callback):
-        done.wait(timeout=max_seconds)
+        done.wait(timeout=min(max_seconds, 90))
     return b"".join(chunks)
 
 
@@ -50,3 +51,29 @@ def play_pcm(chunks, interrupt: threading.Event) -> None:
                 break
             if isinstance(chunk, bytes):
                 out.write(chunk)
+
+
+class VAD:
+    """Borda de sinais de fala com debounce, sem depender de um SDK de VAD."""
+
+    def __init__(self, callback, debounce_ms: int = 200) -> None:
+        if not 150 <= debounce_ms <= 300:
+            raise ValueError("debounce_ms deve estar entre 150 e 300")
+        self._callback = callback
+        self._debounce = debounce_ms / 1000
+        self._started_at: float | None = None
+        self._emitted = False
+
+    def signal(self, speaking: bool, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        if not speaking:
+            self._started_at = None
+            self._emitted = False
+            return
+        if self._emitted:
+            return
+        if self._started_at is None:
+            self._started_at = now
+        elif now - self._started_at >= self._debounce:
+            self._callback()
+            self._emitted = True
