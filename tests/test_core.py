@@ -49,7 +49,7 @@ for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
 from saphira import audio as audio_module
 from saphira import speech as speech_module
 from saphira import tools as tools_module
-from saphira.llm import _pop_sentences
+from saphira.llm import ClaudeBrain, ProviderEvent, _pop_sentences
 from saphira.tools import LocalCommandTool, ToolRegistry
 
 # --- sentence splitter ---
@@ -61,6 +61,67 @@ assert s == ["Um.", "Dois."] and rest == "", (s, rest)
 
 s, rest = _pop_sentences("sem pontuacao ainda")
 assert s == [] and rest == "sem pontuacao ainda"
+s, rest = _pop_sentences("sem pontuacao ainda", flush=True)
+assert s == ["sem pontuacao ainda"] and rest == ""
+
+
+# --- contrato comum de provider e cancelamento ---
+class FakeProvider:
+    def __init__(self, events):
+        self.events = events
+        self.request = None
+
+    def stream(self, **request):
+        self.request = request
+        yield from self.events
+
+
+provider = FakeProvider([
+    ProviderEvent.text_delta("Olá, tudo bem? "),
+    ProviderEvent.text_delta("Deixa eu verificar"),
+    ProviderEvent.tool_use("call-1", "web_search", {"query": "tempo"}),
+    ProviderEvent.end("tool_use"),
+])
+brain = ClaudeBrain("unused", "test-model", ToolRegistry(), "catálogo",
+                    provider=provider)
+trace = []
+brain.respond("como está?", on_sentence=lambda s: trace.append(("sentence", s)),
+              on_event=lambda event: trace.append((event.type, event)))
+assert [kind for kind, _ in trace] == [
+    "text_delta", "sentence", "text_delta", "sentence", "tool_use", "end"
+], trace
+assert trace[1][1] == "Olá, tudo bem?"
+assert trace[3][1] == "Deixa eu verificar"
+assert provider.request["model"] == "test-model"
+assert provider.request["max_tokens"] == 600
+assert provider.request["system"].endswith("catálogo")
+
+
+cancel = threading.Event()
+cancel_provider = FakeProvider([
+    ProviderEvent.text_delta("resposta parcial"),
+    ProviderEvent.cancelled(),
+    ProviderEvent.text_delta("não deve ser emitida."),
+    ProviderEvent.end(),
+])
+
+
+def cancel_after_first(event):
+    if event.type == "text_delta":
+        cancel.set()
+
+
+cancel_brain = ClaudeBrain("unused", "test-model", ToolRegistry(), "catálogo",
+                           provider=cancel_provider)
+cancelled_sentences = []
+cancelled_events = []
+cancel_brain.respond("cancele", cancelled_sentences.append,
+                     on_event=lambda event: (cancelled_events.append(event),
+                                             cancel_after_first(event)),
+                     cancel_event=cancel)
+assert cancelled_sentences == []
+assert [event.type for event in cancelled_events] == ["text_delta"]
+assert cancel_brain._history == []
 
 # --- WebSearchTool ---
 class FakeTavily:
