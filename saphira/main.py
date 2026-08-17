@@ -96,7 +96,9 @@ def say(speech: Speech, text: str) -> None:
 
 
 def run_turn(pcm: bytes, speech: Speech, brain: ClaudeBrain,
-             latency: LatencyMetrics, interrupt: threading.Event | None = None) -> bool:
+             latency: LatencyMetrics, interrupt: threading.Event | None = None,
+             barge_in_event: threading.Event | None = None,
+             on_vad_ready=None, vad_monitor=None) -> bool:
     if len(pcm) < 3200:  # < 100ms de áudio = toque acidental
         return False
 
@@ -113,6 +115,22 @@ def run_turn(pcm: bytes, speech: Speech, brain: ClaudeBrain,
 
     sentences: queue.Queue = queue.Queue()
     interrupt = interrupt or threading.Event()
+    barge_in_event = barge_in_event or threading.Event()
+    vad_stop = threading.Event()
+
+    def on_barge_in() -> None:
+        interrupt.set()
+        barge_in_event.set()
+        vad_stop.set()
+
+    vad = audio.VAD(on_barge_in)
+    if on_vad_ready:
+        on_vad_ready(vad)
+    vad_thread = None
+    if vad_monitor:
+        vad_thread = threading.Thread(target=vad_monitor, args=(vad, vad_stop), daemon=True)
+        vad_thread.start()
+
     speaker = threading.Thread(
         target=speaker_worker,
         args=(sentences, speech, interrupt),
@@ -126,29 +144,49 @@ def run_turn(pcm: bytes, speech: Speech, brain: ClaudeBrain,
         sentences.put(sentence)
 
     try:
-        brain.respond(text, on_sentence=enqueue)
+        brain.respond(text, on_sentence=enqueue, cancel_event=interrupt)
     except Exception:
         log.exception("LLM falhou")
-        sentences.put("Tive um problema para processar agora. Tenta de novo em instantes.")
+        if not interrupt.is_set():
+            sentences.put("Tive um problema para processar agora. Tenta de novo em instantes.")
     finally:
         sentences.put(None)
     speaker.join()
+    vad_stop.set()
+    if vad_thread:
+        vad_thread.join()
     return True
 
 
 def run_ptt_loop(speech: Speech, brain: ClaudeBrain, hotkey_event,
-                 latency: LatencyMetrics | None = None) -> None:
+                 latency: LatencyMetrics | None = None, vad_monitor=None,
+                 on_vad_ready=None) -> None:
     latency = latency or LatencyMetrics()
+    go_listen = False
     while True:
         hotkey_event.clear()
-        hotkey_event.wait()  # 1ª ativação: começa a captura
-        hotkey_event.clear()
+        if not go_listen:
+            hotkey_event.wait()  # 1ª ativação: começa a captura
+            hotkey_event.clear()
+        go_listen = False
 
         latency.capture_started()
         pcm = timed("gravacao", audio.record_until, hotkey_event)
         latency.capture_finished()
         hotkey_event.clear()  # 2ª ativação não pode cancelar o turno normal
-        run_turn(pcm, speech, brain, latency, interrupt=hotkey_event)
+        barge_in = threading.Event()
+        run_turn(
+            pcm,
+            speech,
+            brain,
+            latency,
+            interrupt=hotkey_event,
+            barge_in_event=barge_in,
+            on_vad_ready=on_vad_ready,
+            vad_monitor=vad_monitor,
+        )
+        if barge_in.is_set():
+            go_listen = True
 
 
 def speaker_worker(q: queue.Queue, speech: Speech, interrupt: threading.Event,
@@ -211,7 +249,7 @@ def main() -> None:
              config.HOTKEY)
 
     try:
-        run_ptt_loop(speech, brain, hotkey_event, latency)
+        run_ptt_loop(speech, brain, hotkey_event, latency, vad_monitor=audio.monitor_vad)
     except KeyboardInterrupt:
         pass
     finally:

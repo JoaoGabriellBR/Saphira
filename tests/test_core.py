@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import wave
 from pathlib import Path
 
@@ -707,6 +708,37 @@ for invalid_debounce in (149, 301):
     else:
         assert False, invalid_debounce
 
+monitor_signals = []
+monitor_stop = threading.Event()
+
+
+class FakeMonitorVAD:
+    def signal(self, speaking):
+        monitor_signals.append(speaking)
+
+
+class FakeMonitorInputStream:
+    def __init__(self, **kwargs):
+        self.callback = kwargs["callback"]
+
+    def __enter__(self):
+        self.callback(b"\x00\x00" * 4, 4, None, None)
+        self.callback(b"\xc8\x00" * 4, 4, None, None)
+        monitor_stop.set()
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+old_monitor_input = audio_module.sd.RawInputStream
+audio_module.sd.RawInputStream = FakeMonitorInputStream
+try:
+    audio_module.monitor_vad(FakeMonitorVAD(), monitor_stop, threshold=100)
+finally:
+    audio_module.sd.RawInputStream = old_monitor_input
+assert monitor_signals == [False, True]
+
 # --- Speech: ElevenLabs fake e fallback local ---
 class FakeSpeechToText:
     def convert(self, **kwargs):
@@ -911,7 +943,7 @@ class FakeTurnBrain:
     def __init__(self):
         self.calls = []
 
-    def respond(self, text, on_sentence):
+    def respond(self, text, on_sentence, cancel_event=None):
         self.calls.append(text)
         on_sentence("Resposta factual.")
 
@@ -1024,6 +1056,160 @@ assert len(record_stops) == 1 and record_stops[0] is ptt_event
 assert not ptt_event.is_set()
 assert ptt_speech.transcribe_calls == [b"x" * 3200]
 assert ptt_brain.calls == ["resposta transcrita"]
+
+# --- barge-in: VAD, cancelamento coordenado e retomada ---
+class BlockingBargeBrain:
+    def __init__(self):
+        self.cancel_event = None
+        self.cancelled = threading.Event()
+
+    def respond(self, text, on_sentence, cancel_event=None):
+        self.cancel_event = cancel_event
+        on_sentence("Frase antiga.")
+        while not cancel_event.is_set():
+            cancel_event.wait(0.01)
+        self.cancelled.set()
+        on_sentence("Frase que não deve tocar.")
+
+
+class BargeSpeech:
+    def __init__(self):
+        self.synthesize_calls = []
+
+    def transcribe(self, pcm):
+        return "interrompa"
+
+    def synthesize_stream(self, text):
+        self.synthesize_calls.append(text)
+        return [b"audio antigo"]
+
+
+barge_play_started = threading.Event()
+barge_play_stopped = threading.Event()
+barge_writes = []
+
+
+def blocking_barge_play(chunks, interrupt, on_first_chunk=None):
+    barge_play_started.set()
+    for chunk in chunks:
+        if interrupt.is_set():
+            break
+        barge_writes.append(chunk)
+        if on_first_chunk:
+            on_first_chunk()
+        while not interrupt.wait(0.001):
+            pass
+    barge_play_stopped.set()
+
+
+barge_speech = BargeSpeech()
+barge_brain = BlockingBargeBrain()
+barge_interrupt = threading.Event()
+barge_detected = threading.Event()
+barge_vad_ready = threading.Event()
+barge_vad = []
+barge_latency = main_module.LatencyMetrics(clock=lambda: 2.0)
+barge_latency.capture_finished(at=1.0)
+old_barge_play = main_module.audio.play_pcm
+main_module.audio.play_pcm = blocking_barge_play
+
+
+def save_barge_vad(vad):
+    barge_vad.append(vad)
+    barge_vad_ready.set()
+
+
+barge_thread = threading.Thread(
+    target=main_module.run_turn,
+    args=(b"x" * 3200, barge_speech, barge_brain, barge_latency),
+    kwargs={
+        "interrupt": barge_interrupt,
+        "barge_in_event": barge_detected,
+        "on_vad_ready": save_barge_vad,
+    },
+)
+try:
+    barge_thread.start()
+    assert barge_vad_ready.wait(1), "VAD não foi disponibilizado"
+    assert barge_play_started.wait(1), "playback não começou"
+    detected_at = time.perf_counter()
+    barge_vad[0].signal(True, now=0.0)
+    barge_vad[0].signal(True, now=0.2)
+    assert barge_play_stopped.wait(1), "playback não parou"
+    stopped_at = time.perf_counter()
+    barge_thread.join(1)
+finally:
+    main_module.audio.play_pcm = old_barge_play
+
+assert not barge_thread.is_alive()
+assert stopped_at - detected_at < 0.15
+assert barge_detected.is_set() and barge_interrupt.is_set()
+assert barge_brain.cancel_event is barge_interrupt
+assert barge_brain.cancelled.is_set()
+assert barge_speech.synthesize_calls == ["Frase antiga."]
+assert barge_writes == [b"audio antigo"]
+
+
+class ResumePttEvent:
+    def __init__(self):
+        self.wait_calls = 0
+        self._set = False
+
+    def clear(self):
+        self._set = False
+
+    def set(self):
+        self._set = True
+
+    def is_set(self):
+        return self._set
+
+    def wait(self):
+        self.wait_calls += 1
+        if self.wait_calls == 1:
+            self.set()
+            return True
+        raise StopPttLoop
+
+
+resume_event = ResumePttEvent()
+resume_turns = []
+resume_records = []
+old_run_turn = main_module.run_turn
+old_record_until = main_module.audio.record_until
+
+
+def fake_resume_record(stop):
+    stop.set()
+    pcm = b"primeiro" if not resume_records else b"segundo!"
+    resume_records.append(pcm)
+    return pcm + b"x" * (3200 - len(pcm))
+
+
+def fake_resume_turn(pcm, speech, brain, latency, interrupt=None, barge_in_event=None,
+                     on_vad_ready=None, vad_monitor=None):
+    resume_turns.append(pcm[:8])
+    if len(resume_turns) == 1:
+        barge_in_event.set()
+    return True
+
+
+main_module.audio.record_until = fake_resume_record
+main_module.run_turn = fake_resume_turn
+try:
+    try:
+        main_module.run_ptt_loop(
+            object(), object(), resume_event, main_module.LatencyMetrics(clock=lambda: 2.0)
+        )
+    except StopPttLoop:
+        pass
+finally:
+    main_module.audio.record_until = old_record_until
+    main_module.run_turn = old_run_turn
+
+assert resume_event.wait_calls == 2, resume_event.wait_calls
+assert resume_turns == [b"primeiro", b"segundo!"]
+assert len(resume_records) == 2
 
 # --- LocalCommandTool ---
 plat = "win32" if sys.platform == "win32" else ("darwin" if sys.platform == "darwin" else "linux")
