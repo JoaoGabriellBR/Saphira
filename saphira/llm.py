@@ -54,6 +54,41 @@ class LLMProvider(Protocol):
                tools: list[dict], max_tokens: int,
                cancel_event: threading.Event) -> Iterable[ProviderEvent]: ...
 
+
+class AnthropicProvider:
+    """Adapta o streaming do SDK Anthropic ao contrato interno."""
+
+    def __init__(self, api_key: str) -> None:
+        self._client = anthropic.Anthropic(api_key=api_key)
+
+    def stream(self, *, model: str, system: str, messages: list[dict],
+               tools: list[dict], max_tokens: int,
+               cancel_event: threading.Event) -> Iterable[ProviderEvent]:
+        if cancel_event.is_set():
+            yield ProviderEvent.cancelled()
+            return
+        with self._client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            tools=tools,
+            messages=messages,
+        ) as stream:
+            for delta in stream.text_stream:
+                if cancel_event.is_set():
+                    yield ProviderEvent.cancelled()
+                    return
+                yield ProviderEvent.text_delta(delta)
+            final = stream.get_final_message()
+        if cancel_event.is_set():
+            yield ProviderEvent.cancelled()
+            return
+        for block in final.content:
+            if block.type == "tool_use":
+                yield ProviderEvent.tool_use(block.id, block.name, block.input)
+        yield ProviderEvent.end(final.stop_reason)
+
+
 SYSTEM_TEMPLATE = """Você é Saphira, assistente pessoal por voz em português do Brasil.
 Regras: respostas curtas e naturais para serem FALADAS (sem markdown, sem listas, sem emoji).
 Quando a pergunta depender de dados atuais, use a tool web_search.
@@ -92,8 +127,7 @@ class ClaudeBrain:
     def __init__(self, api_key: str, model: str, tools: ToolRegistry,
                  commands_catalog: str, max_history: int = 20,
                  provider: LLMProvider | None = None) -> None:
-        self._provider = provider
-        self._client = None if provider is not None else anthropic.Anthropic(api_key=api_key)
+        self._provider = provider or AnthropicProvider(api_key)
         self._model = model
         self._tools = tools
         self._system = SYSTEM_TEMPLATE.format(commands_catalog=commands_catalog)
@@ -103,11 +137,7 @@ class ClaudeBrain:
     def respond(self, user_text: str, on_sentence, on_event=None,
                 cancel_event: threading.Event | None = None) -> None:
         """Loop de tool use. on_sentence(frase) é chamado p/ cada frase pronta p/ TTS."""
-        if self._provider is not None:
-            self._respond_with_provider(user_text, on_sentence, on_event, cancel_event)
-            return
-
-        self._respond_with_anthropic(user_text, on_sentence, cancel_event)
+        self._respond_with_provider(user_text, on_sentence, on_event, cancel_event)
 
     def _respond_with_provider(self, user_text: str, on_sentence, on_event,
                                cancel_event: threading.Event | None) -> None:
@@ -182,56 +212,3 @@ class ClaudeBrain:
                 self._history.append({"role": "assistant", "content": assistant_content})
         except _TurnCancelled:
             del self._history[history_start:]
-
-    def _respond_with_anthropic(self, user_text: str, on_sentence,
-                                cancel_event: threading.Event | None) -> None:
-        cancel_event = cancel_event or threading.Event()
-        history_start = len(self._history)
-        self._history.append({"role": "user", "content": user_text})
-        try:
-            while True:
-                if cancel_event.is_set():
-                    raise _TurnCancelled
-                with self._client.messages.stream(
-                    model=self._model,
-                    max_tokens=600,  # respostas faladas são curtas
-                    system=self._system,
-                    tools=self._tools.anthropic_schemas(),
-                    messages=self._history,
-                ) as stream:
-                    buf = ""
-                    for delta in stream.text_stream:
-                        if cancel_event.is_set():
-                            raise _TurnCancelled
-                        buf += delta
-                        sentences, buf = _pop_sentences(buf)
-                        for s in sentences:
-                            on_sentence(s)
-                    final = stream.get_final_message()
-                if cancel_event.is_set():
-                    raise _TurnCancelled
-                if buf.strip():
-                    # Resto do buffer: resposta final OU preâmbulo antes de tool call
-                    # ("deixa eu ver...") — falar os dois é o comportamento desejado.
-                    on_sentence(buf.strip())
-                self._history.append({"role": "assistant", "content": final.content})
-                if final.stop_reason != "tool_use":
-                    break
-                results = []
-                for block in final.content:
-                    if block.type == "tool_use":
-                        log.info("tool_call: %s %s", block.name, block.input)
-                        output = self._tools.execute(block.name, block.input)
-                        results.append({"type": "tool_result",
-                                        "tool_use_id": block.id,
-                                        "content": output})
-                self._history.append({"role": "user", "content": results})
-        except _TurnCancelled:
-            del self._history[history_start:]
-
-        # Memória: janela deslizante. Garante que o corte não deixa tool_result órfão
-        # nem começa no meio de uma troca (API exige 1ª mensagem role=user).
-        del self._history[:-self._max_history]
-        while self._history and (self._history[0]["role"] != "user"
-                                 or isinstance(self._history[0]["content"], list)):
-            self._history.pop(0)

@@ -47,6 +47,7 @@ for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
         assert line.split("=", 1)[1].split("#", 1)[0].strip() == "", f"valor no .env.example: {line}"
 
 from saphira import audio as audio_module
+from saphira import llm as llm_module
 from saphira import speech as speech_module
 from saphira import tools as tools_module
 from saphira.llm import ClaudeBrain, ProviderEvent, _pop_sentences
@@ -122,6 +123,92 @@ cancel_brain.respond("cancele", cancelled_sentences.append,
 assert cancelled_sentences == []
 assert [event.type for event in cancelled_events] == ["text_delta"]
 assert cancel_brain._history == []
+
+
+# --- adaptador Anthropic: streaming, prompt, tool request e flush final ---
+class FakeClaudeBlock:
+    type = "tool_use"
+    id = "claude-call-1"
+    name = "fake_tool"
+    input = {"value": "teste"}
+
+
+class FakeClaudeFinal:
+    stop_reason = "tool_use"
+    content = [FakeClaudeBlock()]
+
+
+class FakeClaudeStream:
+    text_stream = ["Vou verificar. ", "resto sem pontuação"]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def get_final_message(self):
+        return FakeClaudeFinal()
+
+
+class FakeClaudeMessages:
+    def __init__(self):
+        self.calls = []
+
+    def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        return FakeClaudeStream()
+
+
+class FakeAnthropic:
+    instances = []
+
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.messages = FakeClaudeMessages()
+        self.instances.append(self)
+
+
+class FakeClaudeTool:
+    name = "fake_tool"
+    description = "tool de teste"
+    input_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
+
+    def run(self, value):
+        return f"ok {value}"
+
+
+old_anthropic = llm_module.anthropic.Anthropic
+llm_module.anthropic.Anthropic = FakeAnthropic
+try:
+    claude_tools = ToolRegistry()
+    claude_tools.register(FakeClaudeTool())
+    claude = ClaudeBrain("fake-key", "claude-sonnet-5", claude_tools,
+                         "- app 'spotify' (ações: open_app/close_app)")
+    claude_trace = []
+
+    def observe_claude(event):
+        claude_trace.append((event.type, event))
+        if event.type == "tool_use":
+            claude_trace.append(("tool_execution", claude_tools.execute(event.name, event.inputs)))
+
+    claude.respond("verifique", lambda sentence: claude_trace.append(("sentence", sentence)),
+                   on_event=observe_claude)
+    claude_request = FakeAnthropic.instances[-1].messages.calls[0]
+finally:
+    llm_module.anthropic.Anthropic = old_anthropic
+
+assert [kind for kind, _ in claude_trace] == [
+    "text_delta", "sentence", "text_delta", "sentence",
+    "tool_use", "tool_execution", "end",
+], claude_trace
+assert claude_trace[1][1] == "Vou verificar."
+assert claude_trace[3][1] == "resto sem pontuação"
+assert claude_request["model"] == "claude-sonnet-5"
+assert claude_request["max_tokens"] == 600
+assert "português do Brasil" in claude_request["system"]
+assert "spotify" in claude_request["system"]
+assert claude_request["tools"] == claude_tools.anthropic_schemas()
 
 # --- WebSearchTool ---
 class FakeTavily:
