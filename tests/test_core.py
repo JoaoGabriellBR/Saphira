@@ -1,12 +1,14 @@
 """Checks mínimos das partes puras da Saphira (sem frameworks).
 Rodar: python tests/test_core.py
 """
+import io
 import logging
 import os
 import subprocess
 import sys
 import tempfile
 import threading
+import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -45,6 +47,7 @@ for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
         assert line.split("=", 1)[1].split("#", 1)[0].strip() == "", f"valor no .env.example: {line}"
 
 from saphira import audio as audio_module
+from saphira import speech as speech_module
 from saphira import tools as tools_module
 from saphira.llm import _pop_sentences
 from saphira.tools import LocalCommandTool, ToolRegistry
@@ -259,6 +262,92 @@ for invalid_debounce in (149, 301):
         pass
     else:
         assert False, invalid_debounce
+
+# --- Speech: ElevenLabs fake e fallback local ---
+class FakeSpeechToText:
+    def convert(self, **kwargs):
+        self.kwargs = kwargs
+        self.wav = kwargs["file"].read()
+        return type("Response", (), {"text": " texto transcrito "})()
+
+
+class FakeTextToSpeech:
+    def stream(self, **kwargs):
+        self.kwargs = kwargs
+        return iter([b"\x00\x01", b"\x02\x03"])
+
+
+class FakeElevenLabs:
+    instances = []
+
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.speech_to_text = FakeSpeechToText()
+        self.text_to_speech = FakeTextToSpeech()
+        self.instances.append(self)
+
+
+old_elevenlabs = speech_module.ElevenLabs
+speech_module.ElevenLabs = FakeElevenLabs
+try:
+    speech = speech_module.Speech("fake-key", "voice", "scribe_v2", "eleven_flash_v2_5", "por")
+    pcm = b"\x01\x02" * 20
+    assert speech.transcribe(pcm) == "texto transcrito"
+    stt_call = FakeElevenLabs.instances[-1].speech_to_text
+    with wave.open(io.BytesIO(stt_call.wav), "rb") as wav:
+        assert wav.getnchannels() == 1
+        assert wav.getsampwidth() == 2
+        assert wav.getframerate() == 16000
+        assert wav.readframes(wav.getnframes()) == pcm
+    assert stt_call.kwargs["model_id"] == "scribe_v2"
+    assert stt_call.kwargs["language_code"] == "por"
+
+    assert list(speech.synthesize_stream("olá")) == [b"\x00\x01", b"\x02\x03"]
+    assert FakeElevenLabs.instances[-1].text_to_speech.kwargs == {
+        "text": "olá",
+        "voice_id": "voice",
+        "model_id": "eleven_flash_v2_5",
+        "output_format": "pcm_24000",
+    }
+finally:
+    speech_module.ElevenLabs = old_elevenlabs
+
+fallback_before = len(FakeElevenLabs.instances)
+fallback_writes = []
+
+
+class FallbackOutputStream:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def write(self, chunk):
+        fallback_writes.append(chunk)
+
+
+assert speech_module.LOCAL_FALLBACK_MESSAGE == "não consegui te ouvir, tenta de novo"
+old_elevenlabs = speech_module.ElevenLabs
+
+
+def no_external_client(*args, **kwargs):
+    raise AssertionError("fallback local não deve criar cliente ElevenLabs")
+
+
+speech_module.ElevenLabs = no_external_client
+old_output_stream = audio_module.sd.RawOutputStream
+audio_module.sd.RawOutputStream = FallbackOutputStream
+try:
+    audio_module.play_pcm(speech_module.local_fallback_chunks(), threading.Event())
+finally:
+    speech_module.ElevenLabs = old_elevenlabs
+    audio_module.sd.RawOutputStream = old_output_stream
+assert fallback_writes and all(isinstance(chunk, bytes) for chunk in fallback_writes)
+assert len(FakeElevenLabs.instances) == fallback_before
 
 # --- LocalCommandTool ---
 plat = "win32" if sys.platform == "win32" else ("darwin" if sys.platform == "darwin" else "linux")

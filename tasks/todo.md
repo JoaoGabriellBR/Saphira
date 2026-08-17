@@ -15,7 +15,7 @@
 
 ## Phase 3: Speech e raciocínio
 
-- [ ] Task 6: Adaptadores ElevenLabs e áudio local de fallback
+- [x] Task 6: Adaptadores ElevenLabs e áudio local de fallback
 - [ ] Task 7: Contrato de provider LLM e chunker de frases
 - [ ] Task 8: Streaming e tool request do Claude
 - [ ] Task 9: Fallback Gemini com contrato equivalente

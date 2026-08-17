@@ -2,10 +2,14 @@
 import io
 import logging
 import wave
+from pathlib import Path
 
 from elevenlabs import ElevenLabs
 
 log = logging.getLogger("saphira.speech")
+
+LOCAL_FALLBACK_MESSAGE = "não consegui te ouvir, tenta de novo"
+LOCAL_FALLBACK_WAV = Path(__file__).with_name("fallback_audio.wav")
 
 
 def _pcm_to_wav(pcm: bytes, rate: int) -> io.BytesIO:
@@ -18,6 +22,16 @@ def _pcm_to_wav(pcm: bytes, rate: int) -> io.BytesIO:
         w.writeframes(pcm)
     buf.seek(0)
     return buf
+
+
+def local_fallback_chunks(chunk_size: int = 4096):
+    """Lê o fallback local como chunks PCM 24 kHz, sem criar cliente ElevenLabs."""
+    with wave.open(str(LOCAL_FALLBACK_WAV), "rb") as source:
+        if (source.getnchannels(), source.getsampwidth(), source.getframerate()) != (1, 2, 24000):
+            raise ValueError("fallback_audio.wav deve ser PCM mono 16-bit a 24 kHz")
+        frames = max(1, chunk_size // 2)
+        while chunk := source.readframes(frames):
+            yield chunk
 
 
 class Speech:
