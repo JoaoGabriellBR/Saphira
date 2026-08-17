@@ -42,15 +42,19 @@ def record_until(stop: threading.Event, max_seconds: int = 90) -> bytes:
     return b"".join(chunks)
 
 
-def play_pcm(chunks, interrupt: threading.Event) -> None:
-    """Reproduz iterável de chunks PCM; aborta cedo se `interrupt` for setado (barge-in)."""
+def play_pcm(chunks, interrupt: threading.Event, on_first_chunk=None) -> None:
+    """Reproduz chunks PCM e sinaliza o primeiro enviado ao sink."""
     with sd.RawOutputStream(samplerate=TTS_RATE, channels=1, dtype="int16") as out:
+        first_chunk = True
         for chunk in chunks:
             if interrupt.is_set():
                 log.info("playback interrompido (barge-in)")
                 break
             if isinstance(chunk, bytes):
                 out.write(chunk)
+                if first_chunk and on_first_chunk:
+                    first_chunk = False
+                    on_first_chunk()
 
 
 class VAD:

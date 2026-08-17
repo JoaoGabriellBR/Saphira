@@ -4,6 +4,7 @@ Rodar: python tests/test_core.py
 import io
 import logging
 import os
+import queue
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,7 @@ for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
 
 from saphira import audio as audio_module
 from saphira import llm as llm_module
+from saphira import main as main_module
 from saphira import speech as speech_module
 from saphira import tools as tools_module
 from saphira.llm import ClaudeBrain, GeminiProvider, ProviderEvent, _history_units, _pop_sentences
@@ -618,6 +620,7 @@ finally:
 assert timeouts == [90]
 
 writes = []
+first_chunk_events = []
 interrupt = threading.Event()
 output_streams = []
 
@@ -641,11 +644,13 @@ class FakeOutputStream:
 old_output_stream = audio_module.sd.RawOutputStream
 audio_module.sd.RawOutputStream = FakeOutputStream
 try:
-    audio_module.play_pcm([b"primeiro", b"descartado"], interrupt)
+    audio_module.play_pcm([b"primeiro", b"descartado"], interrupt,
+                          lambda: first_chunk_events.append(len(writes)))
 finally:
     audio_module.sd.RawOutputStream = old_output_stream
 
 assert writes == [b"primeiro"]
+assert first_chunk_events == [1]
 assert output_streams[0].kwargs == {"samplerate": 24000, "channels": 1, "dtype": "int16"}
 
 hotkey_calls = []
@@ -787,6 +792,62 @@ finally:
     audio_module.sd.RawOutputStream = old_output_stream
 assert fallback_writes and all(isinstance(chunk, bytes) for chunk in fallback_writes)
 assert len(FakeElevenLabs.instances) == fallback_before
+
+# --- worker de fala frase a frase ---
+class FakeWorkerSpeech:
+    def __init__(self):
+        self.calls = []
+
+    def synthesize_stream(self, text):
+        self.calls.append(text)
+        if text == "falha":
+            raise RuntimeError("TTS indisponível")
+        return [f"{text}-1".encode(), f"{text}-2".encode()]
+
+
+worker_speech = FakeWorkerSpeech()
+worker_played = []
+worker_first_audio = []
+
+
+def fake_worker_play(chunks, interrupt, on_first_chunk=None):
+    for chunk in chunks:
+        if interrupt.is_set():
+            return
+        worker_played.append(chunk)
+        if on_first_chunk:
+            on_first_chunk()
+
+
+old_worker_play = main_module.audio.play_pcm
+old_worker_fallback = main_module.local_fallback_chunks
+main_module.audio.play_pcm = fake_worker_play
+main_module.local_fallback_chunks = lambda: iter([b"fallback"])
+try:
+    worker_queue = queue.Queue()
+    for sentence in ("falha", "ok"):
+        worker_queue.put(sentence)
+    worker_queue.put(None)
+    main_module.speaker_worker(
+        worker_queue,
+        worker_speech,
+        threading.Event(),
+        on_first_audio=lambda: worker_first_audio.append("audio"),
+    )
+
+    discarded_queue = queue.Queue()
+    discarded_queue.put("descartada")
+    discarded_queue.put(None)
+    interrupt = threading.Event()
+    interrupt.set()
+    main_module.speaker_worker(discarded_queue, worker_speech, interrupt)
+finally:
+    main_module.audio.play_pcm = old_worker_play
+    main_module.local_fallback_chunks = old_worker_fallback
+
+assert worker_speech.calls == ["falha", "ok"]
+assert worker_played == [b"fallback", b"ok-1", b"ok-2"]
+assert worker_first_audio == ["audio"]
 
 # --- LocalCommandTool ---
 plat = "win32" if sys.platform == "win32" else ("darwin" if sys.platform == "darwin" else "linux")
