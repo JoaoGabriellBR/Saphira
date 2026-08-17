@@ -5,6 +5,7 @@ Hotkey durante a fala da Saphira = barge-in (interrompe e já volta a escutar).
 
 Rodar:  python -m saphira.main
 """
+from collections import deque
 import logging
 import queue
 import threading
@@ -16,6 +17,67 @@ from .speech import Speech, local_fallback_chunks
 from .tools import LocalCommandTool, ToolRegistry, WebSearchTool
 
 log = logging.getLogger("saphira")
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * weight
+
+
+class LatencyMetrics:
+    def __init__(self, max_interactions: int = 20, clock=time.perf_counter) -> None:
+        if max_interactions < 1:
+            raise ValueError("max_interactions deve ser positivo")
+        self._clock = clock
+        self._ttfa: deque[float] = deque(maxlen=max_interactions)
+        self._capture_finished: float | None = None
+        self._lock = threading.Lock()
+
+    def _timestamp(self, at: float | None) -> float:
+        return self._clock() if at is None else at
+
+    def capture_started(self, at: float | None = None) -> float:
+        timestamp = self._timestamp(at)
+        log.info("captura iniciada")
+        return timestamp
+
+    def capture_finished(self, at: float | None = None) -> float:
+        timestamp = self._timestamp(at)
+        with self._lock:
+            self._capture_finished = timestamp
+        log.info("captura finalizada")
+        return timestamp
+
+    def first_audio(self, at: float | None = None) -> dict[str, float | int]:
+        with self._lock:
+            capture_finished = self._capture_finished
+        if capture_finished is None:
+            raise RuntimeError("primeiro áudio sem fim de captura")
+        timestamp = self._timestamp(at)
+        log.info("primeiro chunk tocando")
+        return self.record(capture_finished, timestamp)
+
+    def record(self, capture_finished: float, first_audio: float) -> dict[str, float | int]:
+        ttfa_ms = (first_audio - capture_finished) * 1000
+        with self._lock:
+            self._ttfa.append(ttfa_ms)
+            values = list(self._ttfa)
+        snapshot: dict[str, float | int] = {
+            "ttfa_ms": ttfa_ms,
+            "p50_ms": _percentile(values, 0.50),
+            "p95_ms": _percentile(values, 0.95),
+            "window_size": len(values),
+        }
+        log.info("ttfa=%.0fms p50=%.0fms p95=%.0fms janela=%d",
+                 snapshot["ttfa_ms"], snapshot["p50_ms"], snapshot["p95_ms"],
+                 snapshot["window_size"])
+        return snapshot
 
 
 def timed(label: str, fn, *args, **kwargs):
@@ -84,6 +146,7 @@ def main() -> None:
     registry.register(commands)
     brain = ClaudeBrain(config.ANTHROPIC_API_KEY, config.CLAUDE_MODEL, registry,
                         commands.catalog(), max_history=config.MAX_HISTORY_MESSAGES)
+    latency = LatencyMetrics()
 
     hotkey_event = threading.Event()
     hotkey = audio.Hotkey(config.HOTKEY, hotkey_event.set)
@@ -100,7 +163,9 @@ def main() -> None:
                 hotkey_event.clear()
             go_listen = False
 
+            latency.capture_started()
             pcm = timed("gravacao", audio.record_until, hotkey_event)
+            latency.capture_finished()
             if len(pcm) < 3200:  # < 100ms de áudio = toque acidental
                 continue
 
@@ -118,7 +183,9 @@ def main() -> None:
             q: queue.Queue = queue.Queue()
             interrupt = hotkey_event  # hotkey durante a fala = barge-in
             speaker = threading.Thread(target=speaker_worker,
-                                       args=(q, speech, interrupt), daemon=True)
+                                       args=(q, speech, interrupt),
+                                       kwargs={"on_first_audio": latency.first_audio},
+                                       daemon=True)
             speaker.start()
             try:
                 brain.respond(text, on_sentence=lambda s: (log.info("saphira: %s", s), q.put(s)))

@@ -26,7 +26,7 @@
 ## Phase 4: Pipeline e orquestração
 
 - [x] Task 12: Worker de fala frase a frase
-- [ ] Task 13: Eventos e métricas de latência
+- [x] Task 13: Eventos e métricas de latência
 - [ ] Task 14: Loop PTT para turno normal
 - [ ] Task 15: Barge-in com cancelamento e retomada
 - [ ] Task 16: Degradação de voz

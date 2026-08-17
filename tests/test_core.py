@@ -849,6 +849,45 @@ assert worker_speech.calls == ["falha", "ok"]
 assert worker_played == [b"fallback", b"ok-1", b"ok-2"]
 assert worker_first_audio == ["audio"]
 
+# --- eventos e métricas de latência ---
+latency_messages = []
+
+
+class LatencyHandler(logging.Handler):
+    def emit(self, record):
+        latency_messages.append(record.getMessage())
+
+
+latency_handler = LatencyHandler()
+main_log = logging.getLogger("saphira")
+main_log.setLevel(logging.INFO)
+main_log.addHandler(latency_handler)
+try:
+    latency = main_module.LatencyMetrics(max_interactions=20)
+    latency.capture_started(at=10.0)
+    latency.capture_finished(at=11.0)
+    first_snapshot = latency.first_audio(at=11.25)
+finally:
+    main_log.removeHandler(latency_handler)
+
+assert first_snapshot == {
+    "ttfa_ms": 250.0,
+    "p50_ms": 250.0,
+    "p95_ms": 250.0,
+    "window_size": 1,
+}
+assert any("captura iniciada" in message for message in latency_messages)
+assert any("captura finalizada" in message for message in latency_messages)
+assert any("primeiro chunk tocando" in message for message in latency_messages)
+
+for i in range(1, 21):
+    finished = 100.0 + i
+    snapshot = latency.record(finished, finished + i / 1000)
+assert snapshot["window_size"] == 20
+assert round(snapshot["ttfa_ms"], 2) == 20.0
+assert round(snapshot["p50_ms"], 2) == 10.5
+assert round(snapshot["p95_ms"], 2) == 19.05
+
 # --- LocalCommandTool ---
 plat = "win32" if sys.platform == "win32" else ("darwin" if sys.platform == "darwin" else "linux")
 py = "python" if plat == "win32" else "python3"
