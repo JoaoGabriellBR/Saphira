@@ -9,6 +9,11 @@ from typing import Any, Iterable, Protocol
 
 import anthropic
 
+try:
+    from google import genai
+except ImportError:  # google-genai é carregado só quando o fallback é usado
+    genai = None
+
 from .tools import ToolRegistry
 
 log = logging.getLogger("saphira.llm")
@@ -23,6 +28,7 @@ class ProviderEvent:
     tool_use_id: str | None = None
     name: str | None = None
     inputs: dict[str, Any] = field(default_factory=dict)
+    content: str = ""
     stop_reason: str | None = None
 
     @property
@@ -45,6 +51,10 @@ class ProviderEvent:
     @classmethod
     def cancelled(cls) -> "ProviderEvent":
         return cls("cancelled")
+
+    @classmethod
+    def tool_result(cls, tool_use_id: str, content: str) -> "ProviderEvent":
+        return cls("tool_result", tool_use_id=tool_use_id, content=content)
 
 
 class LLMProvider(Protocol):
@@ -89,6 +99,146 @@ class AnthropicProvider:
         yield ProviderEvent.end(final.stop_reason)
 
 
+def _field(value: Any, name: str, default=None):
+    if isinstance(value, dict):
+        return value.get(name, default)
+    try:
+        return getattr(value, name)
+    except (AttributeError, ValueError):
+        return default
+
+
+def _gemini_contents(messages: list[dict]) -> list[dict]:
+    contents = []
+    for message in messages:
+        raw_content = message.get("content", "")
+        blocks = raw_content if isinstance(raw_content, list) else [{"type": "text", "text": raw_content}]
+        role = "model" if message["role"] == "assistant" else "user"
+        if any(isinstance(block, dict) and block.get("type") == "tool_result" for block in blocks):
+            role = "tool"
+        parts = []
+        for block in blocks:
+            if isinstance(block, str):
+                parts.append({"text": block})
+                continue
+            block_type = block.get("type")
+            if block_type == "text":
+                parts.append({"text": block.get("text", "")})
+            elif block_type == "tool_use":
+                parts.append({"function_call": {
+                    "name": block.get("name", ""),
+                    "args": block.get("input", {}),
+                }})
+            elif block_type == "tool_result":
+                parts.append({"function_response": {
+                    "name": block.get("name", ""),
+                    "response": {"result": block.get("content", "")},
+                }})
+        if parts:
+            contents.append({"role": role, "parts": parts})
+    return contents
+
+
+def _gemini_tools(tools: list[dict]) -> list[dict]:
+    if not tools:
+        return []
+    return [{"function_declarations": [
+        {
+            "name": tool["name"],
+            "description": tool.get("description", ""),
+            "parameters_json_schema": tool.get("input_schema", {"type": "object"}),
+        }
+        for tool in tools
+    ]}]
+
+
+class GeminiProvider:
+    """Adapta o streaming do google-genai ao contrato interno."""
+
+    def __init__(self, api_key: str, model: str = "gemini-3.6-flash", client=None) -> None:
+        self._model = model
+        if client is not None:
+            self._client = client
+        elif genai is not None:
+            self._client = genai.Client(api_key=api_key)
+        else:
+            raise RuntimeError("google-genai não instalado; instale requirements.txt")
+
+    def stream(self, *, model: str, system: str, messages: list[dict],
+               tools: list[dict], max_tokens: int,
+               cancel_event: threading.Event) -> Iterable[ProviderEvent]:
+        if cancel_event.is_set():
+            yield ProviderEvent.cancelled()
+            return
+        config = {
+            "system_instruction": system,
+            "max_output_tokens": max_tokens,
+            "tools": _gemini_tools(tools),
+        }
+        chunks = self._client.models.generate_content_stream(
+            model=self._model,
+            contents=_gemini_contents(messages),
+            config=config,
+        )
+        tool_index = 0
+        finish_reason = None
+        for chunk in chunks:
+            if cancel_event.is_set():
+                yield ProviderEvent.cancelled()
+                return
+            text = _field(chunk, "text", "") or ""
+            if text:
+                yield ProviderEvent.text_delta(text)
+            for call in _gemini_function_calls(chunk):
+                tool_id = str(_field(call, "id", None) or f"gemini-tool-{tool_index}")
+                tool_index += 1
+                yield ProviderEvent.tool_use(
+                    tool_id,
+                    _field(call, "name", ""),
+                    dict(_field(call, "args", {}) or {}),
+                )
+            for result in _gemini_function_responses(chunk):
+                tool_id = str(_field(result, "id", None) or "gemini-tool-result")
+                response = _field(result, "response", "")
+                if isinstance(response, dict):
+                    response = response.get("result", response.get("content", response))
+                yield ProviderEvent.tool_result(tool_id, str(response))
+            for candidate in _field(chunk, "candidates", []) or []:
+                finish_reason = _field(candidate, "finish_reason", finish_reason) or finish_reason
+        if cancel_event.is_set():
+            yield ProviderEvent.cancelled()
+            return
+        yield ProviderEvent.end(str(finish_reason) if finish_reason is not None else None)
+
+
+def _gemini_function_calls(chunk: Any) -> list[Any]:
+    calls = _field(chunk, "function_calls", None)
+    if calls:
+        return list(calls)
+    found = []
+    for candidate in _field(chunk, "candidates", []) or []:
+        content = _field(candidate, "content", None)
+        for part in _field(content, "parts", []) or []:
+            call = _field(part, "function_call", None)
+            if call is not None:
+                found.append(call)
+    return found
+
+
+def _gemini_function_responses(chunk: Any) -> list[Any]:
+    responses = _field(chunk, "function_responses", None)
+    if responses:
+        return list(responses)
+    found = []
+    for candidate in _field(chunk, "candidates", []) or []:
+        content = _field(candidate, "content", None)
+        for part in _field(content, "parts", []) or []:
+            response = _field(part, "function_response", None)
+            if response is not None:
+                found.append(response)
+    return found
+
+
 SYSTEM_TEMPLATE = """Você é Saphira, assistente pessoal por voz em português do Brasil.
 Regras: respostas curtas e naturais para serem FALADAS (sem markdown, sem listas, sem emoji).
 Quando a pergunta depender de dados atuais, use a tool web_search.
@@ -126,8 +276,10 @@ def _pop_sentences(buf: str, flush: bool = False) -> tuple[list[str], str]:
 class ClaudeBrain:
     def __init__(self, api_key: str, model: str, tools: ToolRegistry,
                  commands_catalog: str, max_history: int = 20,
-                 provider: LLMProvider | None = None) -> None:
-        self._provider = provider or AnthropicProvider(api_key)
+                 provider: LLMProvider | None = None,
+                 fallback_provider: LLMProvider | None = None) -> None:
+        self._provider = provider if provider is not None else AnthropicProvider(api_key)
+        self._fallback_provider = fallback_provider
         self._model = model
         self._tools = tools
         self._system = SYSTEM_TEMPLATE.format(commands_catalog=commands_catalog)
@@ -144,6 +296,35 @@ class ClaudeBrain:
         cancel_event = cancel_event or threading.Event()
         history_start = len(self._history)
         self._history.append({"role": "user", "content": user_text})
+
+        providers = [self._provider]
+        if self._fallback_provider is not None:
+            providers.append(self._fallback_provider)
+        try:
+            for index, provider in enumerate(providers):
+                try:
+                    assistant_content = self._consume_provider(
+                        provider, on_sentence, on_event, cancel_event)
+                    if assistant_content:
+                        self._history.append({"role": "assistant", "content": assistant_content})
+                    return
+                except _TurnCancelled:
+                    raise
+                except Exception:
+                    if index == len(providers) - 1:
+                        raise
+                    if cancel_event.is_set():
+                        raise _TurnCancelled
+                    log.warning("provider %s falhou; tentando fallback", type(provider).__name__,
+                                exc_info=True)
+        except _TurnCancelled:
+            del self._history[history_start:]
+        except Exception:
+            del self._history[history_start:]
+            raise
+
+    def _consume_provider(self, provider: LLMProvider, on_sentence, on_event,
+                          cancel_event: threading.Event) -> list[dict]:
         buffer = ""
         assistant_content = []
 
@@ -161,7 +342,7 @@ class ClaudeBrain:
                 emit_sentence(sentence)
 
         try:
-            events = self._provider.stream(
+            events = provider.stream(
                 model=self._model,
                 system=self._system,
                 messages=list(self._history),
@@ -203,12 +384,14 @@ class ClaudeBrain:
                     if on_event:
                         on_event(event)
                     raise _TurnCancelled
+                elif event.type == "tool_result":
+                    if on_event:
+                        on_event(event)
                 else:
                     raise ValueError(f"evento de provider desconhecido: {event.type}")
             if cancel_event.is_set():
                 raise _TurnCancelled
             flush_buffer()
-            if assistant_content:
-                self._history.append({"role": "assistant", "content": assistant_content})
+            return assistant_content
         except _TurnCancelled:
-            del self._history[history_start:]
+            raise

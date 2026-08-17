@@ -23,6 +23,7 @@ GEMINI_API_KEY = _req("GEMINI_API_KEY")  # fallback LLM — aistudio.google.com 
 # Opcionais / defaults
 # Confirme o id do modelo em https://docs.anthropic.com/en/docs/about-claude/models antes de rodar.
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
+GEMINI_MODEL = "gemini-3.6-flash"
 STT_MODEL = "scribe_v2"
 TTS_MODEL = "eleven_flash_v2_5"  # troque por "eleven_multilingual_v2" p/ mais expressão (mais latência)
 LANGUAGE = "por"

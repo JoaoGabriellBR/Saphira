@@ -18,7 +18,7 @@
 - [x] Task 6: Adaptadores ElevenLabs e áudio local de fallback
 - [x] Task 7: Contrato de provider LLM e chunker de frases
 - [x] Task 8: Streaming e tool request do Claude
-- [ ] Task 9: Fallback Gemini com contrato equivalente
+- [x] Task 9: Fallback Gemini com contrato equivalente
 - [ ] Task 10: Janela de memória em RAM
 - [ ] Task 11: Loop de tools e reinjeção de `tool_result`
 - [ ] Checkpoint: Speech e providers

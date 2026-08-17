@@ -26,6 +26,7 @@ from saphira import config
 
 assert config.CLAUDE_MODEL == "claude-sonnet-5", config.CLAUDE_MODEL
 assert config.GEMINI_API_KEY == "test-gemini_api_key"
+assert config.GEMINI_MODEL == "gemini-3.6-flash"
 assert config.STT_MODEL == "scribe_v2"
 assert config.TTS_MODEL == "eleven_flash_v2_5"
 assert config.LANGUAGE == "por"
@@ -50,7 +51,7 @@ from saphira import audio as audio_module
 from saphira import llm as llm_module
 from saphira import speech as speech_module
 from saphira import tools as tools_module
-from saphira.llm import ClaudeBrain, ProviderEvent, _pop_sentences
+from saphira.llm import ClaudeBrain, GeminiProvider, ProviderEvent, _pop_sentences
 from saphira.tools import LocalCommandTool, ToolRegistry
 
 # --- sentence splitter ---
@@ -209,6 +210,126 @@ assert claude_request["max_tokens"] == 600
 assert "português do Brasil" in claude_request["system"]
 assert "spotify" in claude_request["system"]
 assert claude_request["tools"] == claude_tools.anthropic_schemas()
+
+
+# --- provider Gemini: parity de eventos, modelo próprio e cancelamento ---
+class FakeGeminiFunctionCall:
+    id = "gemini-call-1"
+    name = "fake_tool"
+    args = {"value": "gemini"}
+
+
+class FakeGeminiFunctionResponse:
+    id = "gemini-call-1"
+    name = "fake_tool"
+    response = {"result": "ok gemini"}
+
+
+class FakeGeminiChunk:
+    def __init__(self, text=None, function_calls=None, function_responses=None):
+        self.text = text
+        self.function_calls = function_calls or []
+        self.function_responses = function_responses or []
+
+
+class FakeGeminiModels:
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.calls = []
+
+    def generate_content_stream(self, **kwargs):
+        self.calls.append(kwargs)
+        yield from self.chunks
+
+
+class FakeGeminiClient:
+    def __init__(self, chunks):
+        self.models = FakeGeminiModels(chunks)
+
+
+gemini_client = FakeGeminiClient([
+    FakeGeminiChunk(text="Resposta Gemini. "),
+    FakeGeminiChunk(function_calls=[FakeGeminiFunctionCall()]),
+    FakeGeminiChunk(function_responses=[FakeGeminiFunctionResponse()]),
+])
+gemini = GeminiProvider("fake-gemini-key", client=gemini_client)
+gemini_events = list(gemini.stream(
+    model="ignored-by-gemini",
+    system="sistema",
+    messages=[{"role": "user", "content": "oi"}],
+    tools=[{"name": "fake_tool", "description": "x", "input_schema": {"type": "object"}}],
+    max_tokens=600,
+    cancel_event=threading.Event(),
+))
+assert [event.type for event in gemini_events] == [
+    "text_delta", "tool_use", "tool_result", "end"
+], gemini_events
+assert gemini_events[1].name == "fake_tool"
+assert gemini_events[2].content == "ok gemini"
+gemini_request = gemini_client.models.calls[0]
+assert gemini_request["model"] == "gemini-3.6-flash"
+assert gemini_request["config"]["max_output_tokens"] == 600
+assert gemini_request["config"]["system_instruction"] == "sistema"
+assert gemini_request["config"]["tools"][0]["function_declarations"][0]["name"] == "fake_tool"
+assert "parameters_json_schema" in gemini_request["config"]["tools"][0]["function_declarations"][0]
+
+cancel_gemini = threading.Event()
+cancel_gemini.set()
+assert [event.type for event in gemini.stream(
+    model="ignored",
+    system="sistema",
+    messages=[],
+    tools=[],
+    max_tokens=600,
+    cancel_event=cancel_gemini,
+)] == ["cancelled"]
+
+
+# --- failover Claude -> Gemini sem duplicar o user_text ---
+class FailingProvider:
+    def __init__(self, detail):
+        self.detail = detail
+        self.calls = []
+
+    def stream(self, **request):
+        self.calls.append(request)
+        raise RuntimeError(self.detail)
+
+
+class SuccessfulProvider:
+    def __init__(self):
+        self.calls = []
+
+    def stream(self, **request):
+        self.calls.append(request)
+        yield ProviderEvent.text_delta("resposta do fallback")
+        yield ProviderEvent.end()
+
+
+primary = FailingProvider("Claude indisponível")
+fallback = SuccessfulProvider()
+fallback_brain = ClaudeBrain("unused", "claude-sonnet-5", ToolRegistry(), "catálogo",
+                             provider=primary, fallback_provider=fallback)
+fallback_sentences = []
+fallback_brain.respond("uma pergunta", fallback_sentences.append)
+assert fallback_sentences == ["resposta do fallback"]
+assert len(primary.calls) == len(fallback.calls) == 1
+assert [m["role"] for m in primary.calls[0]["messages"]] == ["user"]
+assert [m["role"] for m in fallback.calls[0]["messages"]] == ["user"]
+assert fallback.calls[0]["messages"][0]["content"] == "uma pergunta"
+
+first_failure = FailingProvider("Claude indisponível")
+second_failure = FailingProvider("Gemini indisponível")
+both_failed_brain = ClaudeBrain("unused", "claude-sonnet-5", ToolRegistry(), "catálogo",
+                                provider=first_failure, fallback_provider=second_failure)
+try:
+    both_failed_brain.respond("falhe", lambda _: None)
+except RuntimeError as exc:
+    assert str(exc) == "Gemini indisponível"
+else:
+    assert False, "falha dos dois providers deveria chegar ao orquestrador"
+assert len(first_failure.calls) == len(second_failure.calls) == 1
+assert both_failed_brain._history == []
 
 # --- WebSearchTool ---
 class FakeTavily:
