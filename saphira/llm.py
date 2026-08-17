@@ -273,6 +273,67 @@ def _pop_sentences(buf: str, flush: bool = False) -> tuple[list[str], str]:
     return sentences, rest
 
 
+def _tool_result_blocks(message: dict) -> list[dict]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [block for block in content
+            if isinstance(block, dict) and block.get("type") == "tool_result"]
+
+
+def _tool_use_blocks(message: dict) -> list[dict]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [block for block in content
+            if isinstance(block, dict) and block.get("type") == "tool_use"]
+
+
+def _message_units(message: dict) -> int:
+    return max(1, len(_tool_result_blocks(message)))
+
+
+def _history_units(history: list[dict]) -> int:
+    return sum(_message_units(message) for message in history)
+
+
+def _is_turn_start(message: dict) -> bool:
+    return message.get("role") == "user" and not _tool_result_blocks(message)
+
+
+def _turn_start(history: list[dict], index: int) -> int:
+    for position in range(index, -1, -1):
+        if _is_turn_start(history[position]):
+            return position
+    return 0
+
+
+def _safe_history_start(history: list[dict], start: int) -> int:
+    start = _turn_start(history, start)
+    while True:
+        extended = False
+        retained_uses = {
+            block.get("id")
+            for message in history[start:]
+            for block in _tool_use_blocks(message)
+        }
+        for message in history[start:]:
+            for result in _tool_result_blocks(message):
+                tool_use_id = result.get("tool_use_id")
+                if not tool_use_id or tool_use_id in retained_uses:
+                    continue
+                for position in range(start - 1, -1, -1):
+                    if any(block.get("id") == tool_use_id
+                           for block in _tool_use_blocks(history[position])):
+                        new_start = _turn_start(history, position)
+                        if new_start < start:
+                            start = new_start
+                            extended = True
+                        break
+        if not extended:
+            return start
+
+
 class ClaudeBrain:
     def __init__(self, api_key: str, model: str, tools: ToolRegistry,
                  commands_catalog: str, max_history: int = 20,
@@ -307,6 +368,7 @@ class ClaudeBrain:
                         provider, on_sentence, on_event, cancel_event)
                     if assistant_content:
                         self._history.append({"role": "assistant", "content": assistant_content})
+                    self._trim_history()
                     return
                 except _TurnCancelled:
                     raise
@@ -395,3 +457,17 @@ class ClaudeBrain:
             return assistant_content
         except _TurnCancelled:
             raise
+
+    def _trim_history(self) -> None:
+        if _history_units(self._history) <= self._max_history:
+            return
+        kept_units = 0
+        start = len(self._history)
+        for position in range(len(self._history) - 1, -1, -1):
+            units = _message_units(self._history[position])
+            if kept_units and kept_units + units > self._max_history:
+                break
+            kept_units += units
+            start = position
+        start = _safe_history_start(self._history, start)
+        del self._history[:start]

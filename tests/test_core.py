@@ -51,7 +51,7 @@ from saphira import audio as audio_module
 from saphira import llm as llm_module
 from saphira import speech as speech_module
 from saphira import tools as tools_module
-from saphira.llm import ClaudeBrain, GeminiProvider, ProviderEvent, _pop_sentences
+from saphira.llm import ClaudeBrain, GeminiProvider, ProviderEvent, _history_units, _pop_sentences
 from saphira.tools import LocalCommandTool, ToolRegistry
 
 # --- sentence splitter ---
@@ -330,6 +330,58 @@ else:
     assert False, "falha dos dois providers deveria chegar ao orquestrador"
 assert len(first_failure.calls) == len(second_failure.calls) == 1
 assert both_failed_brain._history == []
+
+
+# --- janela de memória: contagem, corte seguro e cancelamento ---
+window_brain = ClaudeBrain("unused", "test-model", ToolRegistry(), "catálogo",
+                           max_history=20, provider=SuccessfulProvider())
+window_brain._history = [
+    {"role": role, "content": f"mensagem {i}"}
+    for i in range(11)
+    for role in ("user", "assistant")
+]
+assert _history_units(window_brain._history) == 22
+window_brain._trim_history()
+assert len(window_brain._history) == 20
+assert window_brain._history[0]["content"] == "mensagem 1"
+assert _history_units([{"role": "user", "content": [
+    {"type": "tool_result", "tool_use_id": "a", "content": "ok"},
+    {"type": "tool_result", "tool_use_id": "b", "content": "ok"},
+]}]) == 2
+
+tool_window = ClaudeBrain("unused", "test-model", ToolRegistry(), "catálogo",
+                          max_history=4, provider=SuccessfulProvider())
+tool_window._history = [
+    {"role": "user", "content": "pergunta antiga"},
+    {"role": "assistant", "content": [{"type": "text", "text": "resposta antiga"}]},
+    {"role": "user", "content": "pergunta com tool"},
+    {"role": "assistant", "content": [{"type": "tool_use", "id": "call-1", "name": "fake_tool", "input": {}}]},
+    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "ok"}]},
+    {"role": "assistant", "content": [{"type": "text", "text": "resultado final"}]},
+    {"role": "user", "content": "pergunta nova"},
+    {"role": "assistant", "content": [{"type": "text", "text": "resposta nova"}]},
+]
+tool_window._trim_history()
+assert tool_window._history[0]["content"] == "pergunta com tool"
+assert any(block.get("type") == "tool_use" for block in tool_window._history[1]["content"])
+assert any(block.get("type") == "tool_result" for block in tool_window._history[2]["content"])
+assert _history_units(tool_window._history) == 6  # extensão segura pode passar de 4
+
+new_brain = ClaudeBrain("unused", "test-model", ToolRegistry(), "catálogo",
+                        provider=SuccessfulProvider())
+assert new_brain._history == []
+
+cancel_history = [{"role": "user", "content": "histórico preservado"}]
+cancel_memory_brain = ClaudeBrain("unused", "test-model", ToolRegistry(), "catálogo",
+                                  provider=FakeProvider([ProviderEvent.text_delta("parcial")]))
+cancel_memory_brain._history = list(cancel_history)
+cancel_memory_event = threading.Event()
+cancel_memory_brain.respond(
+    "turno cancelado", lambda _: None,
+    on_event=lambda event: cancel_memory_event.set(),
+    cancel_event=cancel_memory_event,
+)
+assert cancel_memory_brain._history == cancel_history
 
 # --- WebSearchTool ---
 class FakeTavily:
