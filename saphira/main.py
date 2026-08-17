@@ -12,7 +12,7 @@ import threading
 import time
 
 from . import audio, config
-from .llm import ClaudeBrain
+from .llm import ClaudeBrain, GeminiProvider
 from .speech import LOCAL_FALLBACK_MESSAGE, Speech, local_fallback_chunks
 from .tools import LocalCommandTool, ToolRegistry, WebSearchTool
 
@@ -204,6 +204,18 @@ def run_ptt_loop(speech: Speech, brain: ClaudeBrain, hotkey_event,
             go_listen = True
 
 
+def build_brain(registry: ToolRegistry, commands: LocalCommandTool) -> ClaudeBrain:
+    fallback = GeminiProvider(config.GEMINI_API_KEY, config.GEMINI_MODEL)
+    return ClaudeBrain(
+        config.ANTHROPIC_API_KEY,
+        config.CLAUDE_MODEL,
+        registry,
+        commands.catalog(),
+        max_history=config.MAX_HISTORY_MESSAGES,
+        fallback_provider=fallback,
+    )
+
+
 def speaker_worker(q: queue.Queue, speech: Speech, interrupt: threading.Event,
                    on_first_audio=None) -> None:
     """Consome frases → sintetiza → toca; sentinela None encerra."""
@@ -253,8 +265,7 @@ def main() -> None:
     registry.register(WebSearchTool(config.TAVILY_API_KEY))
     commands = LocalCommandTool(config.COMMANDS_FILE)
     registry.register(commands)
-    brain = ClaudeBrain(config.ANTHROPIC_API_KEY, config.CLAUDE_MODEL, registry,
-                        commands.catalog(), max_history=config.MAX_HISTORY_MESSAGES)
+    brain = build_brain(registry, commands)
     latency = LatencyMetrics()
 
     hotkey_event = threading.Event()

@@ -1350,6 +1350,77 @@ assert resume_event.wait_calls == 2, resume_event.wait_calls
 assert resume_turns == [b"primeiro", b"segundo!"]
 assert len(resume_records) == 2
 
+# --- degradação de raciocínio e tools ---
+class FakeConfiguredGemini:
+    instances = []
+
+    def __init__(self, api_key, model):
+        self.api_key = api_key
+        self.model = model
+        self.instances.append(self)
+
+
+class FakeConfiguredBrain:
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        self.instances.append(self)
+
+
+class FakeCommands:
+    def catalog(self):
+        return "catálogo"
+
+
+old_main_gemini = main_module.GeminiProvider
+old_main_brain = main_module.ClaudeBrain
+main_module.GeminiProvider = FakeConfiguredGemini
+main_module.ClaudeBrain = FakeConfiguredBrain
+try:
+    configured_brain = main_module.build_brain(ToolRegistry(), FakeCommands())
+finally:
+    main_module.GeminiProvider = old_main_gemini
+    main_module.ClaudeBrain = old_main_brain
+
+assert configured_brain.kwargs["fallback_provider"] is FakeConfiguredGemini.instances[-1]
+assert configured_brain.kwargs["fallback_provider"].api_key == config.GEMINI_API_KEY
+assert configured_brain.kwargs["fallback_provider"].model == config.GEMINI_MODEL
+
+
+class FailingBrain:
+    def __init__(self):
+        self.cancel_event = None
+
+    def respond(self, text, on_sentence, cancel_event=None):
+        self.cancel_event = cancel_event
+        raise RuntimeError("Claude e Gemini indisponíveis")
+
+
+recovery_audio = []
+recovery_speech = FakeTurnSpeech()
+recovery_brain = FailingBrain()
+recovery_latency = main_module.LatencyMetrics(clock=lambda: 2.0)
+recovery_latency.capture_finished(at=1.0)
+old_recovery_play = main_module.audio.play_pcm
+main_module.audio.play_pcm = lambda chunks, interrupt, on_first_chunk=None: recovery_audio.extend(chunks)
+try:
+    assert main_module.run_turn(
+        b"x" * 3200,
+        recovery_speech,
+        recovery_brain,
+        recovery_latency,
+    )
+finally:
+    main_module.audio.play_pcm = old_recovery_play
+
+assert recovery_brain.cancel_event is not None
+assert recovery_speech.synthesize_calls == [
+    "Tive um problema para processar agora. Tenta de novo em instantes."
+]
+assert recovery_audio == [b"pcm da resposta"]
+
 # --- LocalCommandTool ---
 plat = "win32" if sys.platform == "win32" else ("darwin" if sys.platform == "darwin" else "linux")
 py = "python" if plat == "win32" else "python3"

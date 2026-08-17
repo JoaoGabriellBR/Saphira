@@ -30,7 +30,7 @@
 - [x] Task 14: Loop PTT para turno normal
 - [x] Task 15: Barge-in com cancelamento e retomada
 - [x] Task 16: Degradação de voz
-- [ ] Task 17: Degradação de raciocínio e tools
+- [x] Task 17: Degradação de raciocínio e tools
 - [ ] Checkpoint: Orquestração completa
 
 ## Phase 5: Aceite v1
