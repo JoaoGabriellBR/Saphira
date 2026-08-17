@@ -69,13 +69,16 @@ assert s == ["sem pontuacao ainda"] and rest == ""
 
 # --- contrato comum de provider e cancelamento ---
 class FakeProvider:
-    def __init__(self, events):
+    def __init__(self, events, follow_up=None):
         self.events = events
+        self.follow_up = follow_up or [ProviderEvent.end()]
         self.request = None
+        self.calls = 0
 
     def stream(self, **request):
         self.request = request
-        yield from self.events
+        self.calls += 1
+        yield from (self.events if self.calls == 1 else self.follow_up)
 
 
 provider = FakeProvider([
@@ -90,7 +93,8 @@ trace = []
 brain.respond("como está?", on_sentence=lambda s: trace.append(("sentence", s)),
               on_event=lambda event: trace.append((event.type, event)))
 assert [kind for kind, _ in trace] == [
-    "text_delta", "sentence", "text_delta", "sentence", "tool_use", "end"
+    "text_delta", "sentence", "text_delta", "sentence", "tool_use", "end",
+    "tool_result", "end",
 ], trace
 assert trace[1][1] == "Olá, tudo bem?"
 assert trace[3][1] == "Deixa eu verificar"
@@ -135,12 +139,16 @@ class FakeClaudeBlock:
 
 
 class FakeClaudeFinal:
-    stop_reason = "tool_use"
-    content = [FakeClaudeBlock()]
+    def __init__(self, tool_use):
+        self.stop_reason = "tool_use" if tool_use else "end_turn"
+        self.content = [FakeClaudeBlock()] if tool_use else []
 
 
 class FakeClaudeStream:
-    text_stream = ["Vou verificar. ", "resto sem pontuação"]
+    def __init__(self, tool_use):
+        self.text_stream = (["Vou verificar. ", "resto sem pontuação"]
+                            if tool_use else ["resposta final."])
+        self._tool_use = tool_use
 
     def __enter__(self):
         return self
@@ -149,7 +157,7 @@ class FakeClaudeStream:
         return False
 
     def get_final_message(self):
-        return FakeClaudeFinal()
+        return FakeClaudeFinal(self._tool_use)
 
 
 class FakeClaudeMessages:
@@ -158,7 +166,7 @@ class FakeClaudeMessages:
 
     def stream(self, **kwargs):
         self.calls.append(kwargs)
-        return FakeClaudeStream()
+        return FakeClaudeStream(len(self.calls) == 1)
 
 
 class FakeAnthropic:
@@ -191,7 +199,7 @@ try:
     def observe_claude(event):
         claude_trace.append((event.type, event))
         if event.type == "tool_use":
-            claude_trace.append(("tool_execution", claude_tools.execute(event.name, event.inputs)))
+            claude_trace.append(("tool_seen", event.name))
 
     claude.respond("verifique", lambda sentence: claude_trace.append(("sentence", sentence)),
                    on_event=observe_claude)
@@ -201,7 +209,8 @@ finally:
 
 assert [kind for kind, _ in claude_trace] == [
     "text_delta", "sentence", "text_delta", "sentence",
-    "tool_use", "tool_execution", "end",
+    "tool_use", "tool_seen", "end", "tool_result",
+    "text_delta", "sentence", "end",
 ], claude_trace
 assert claude_trace[1][1] == "Vou verificar."
 assert claude_trace[3][1] == "resto sem pontuação"
@@ -382,6 +391,115 @@ cancel_memory_brain.respond(
     cancel_event=cancel_memory_event,
 )
 assert cancel_memory_brain._history == cancel_history
+
+
+# --- loop de tools: execução, reinjeção, erro e cancelamento ---
+class LoopTool:
+    name = "loop_tool"
+    description = "tool do loop"
+    input_schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+
+    def __init__(self, order, result="resultado da tool", cancel=None, error=None):
+        self.order = order
+        self.result = result
+        self.cancel = cancel
+        self.error = error
+
+    def run(self, query):
+        self.order.append(("tool", query))
+        if self.cancel is not None:
+            self.cancel.set()
+        if self.error:
+            raise RuntimeError(self.error)
+        return self.result
+
+
+class ToolLoopProvider:
+    def __init__(self, final_text="resultado tratado"):
+        self.requests = []
+        self.final_text = final_text
+
+    def stream(self, **request):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            yield ProviderEvent.text_delta("Vou consultar. ")
+            yield ProviderEvent.tool_use("loop-call-1", "loop_tool", {"query": "agora"})
+            yield ProviderEvent.end("tool_use")
+            return
+        tool_results = [
+            block
+            for message in request["messages"]
+            if isinstance(message.get("content"), list)
+            for block in message["content"]
+            if block.get("type") == "tool_result"
+        ]
+        assert tool_results, request["messages"]
+        yield ProviderEvent.text_delta(self.final_text)
+        yield ProviderEvent.end()
+
+
+tool_order = []
+tool_registry = ToolRegistry()
+tool_registry.register(LoopTool(tool_order, result="42"))
+tool_provider = ToolLoopProvider(final_text="O resultado foi 42.")
+tool_brain = ClaudeBrain("unused", "test-model", tool_registry, "catálogo",
+                         provider=tool_provider)
+spoken = []
+provider_events = []
+tool_brain.respond(
+    "qual o resultado?",
+    lambda sentence: (spoken.append(sentence), tool_order.append(("sentence", sentence))),
+    on_event=provider_events.append,
+)
+assert spoken == ["Vou consultar.", "O resultado foi 42."]
+assert tool_order == [
+    ("sentence", "Vou consultar."),
+    ("tool", "agora"),
+    ("sentence", "O resultado foi 42."),
+]
+assert len(tool_provider.requests) == 2
+assert [event.type for event in provider_events] == [
+    "text_delta", "tool_use", "end", "tool_result", "text_delta", "end"
+]
+result_messages = [
+    message for message in tool_provider.requests[1]["messages"]
+    if isinstance(message.get("content"), list)
+]
+assert result_messages[-1]["content"] == [{
+    "type": "tool_result",
+    "tool_use_id": "loop-call-1",
+    "content": "42",
+}]
+
+error_order = []
+error_registry = ToolRegistry()
+error_registry.register(LoopTool(error_order, error="falha controlada"))
+error_provider = ToolLoopProvider(final_text="A tool falhou, mas a conversa continua.")
+error_brain = ClaudeBrain("unused", "test-model", error_registry, "catálogo",
+                          provider=error_provider)
+error_spoken = []
+error_brain.respond("execute", error_spoken.append)
+error_results = [
+    block
+    for message in error_provider.requests[1]["messages"]
+    if isinstance(message.get("content"), list)
+    for block in message["content"]
+    if block.get("type") == "tool_result"
+]
+assert error_spoken == ["Vou consultar.", "A tool falhou, mas a conversa continua."]
+assert error_results[0]["content"] == "Erro ao executar loop_tool: falha controlada"
+
+cancel_tool_event = threading.Event()
+cancel_order = []
+cancel_registry = ToolRegistry()
+cancel_registry.register(LoopTool(cancel_order, cancel=cancel_tool_event))
+cancel_provider = ToolLoopProvider()
+cancel_loop_brain = ClaudeBrain("unused", "test-model", cancel_registry, "catálogo",
+                                provider=cancel_provider)
+cancel_loop_brain.respond("cancele", lambda _: None, cancel_event=cancel_tool_event)
+assert len(cancel_provider.requests) == 1
+assert cancel_loop_brain._history == []
+assert cancel_order == [("tool", "agora")]
 
 # --- WebSearchTool ---
 class FakeTavily:

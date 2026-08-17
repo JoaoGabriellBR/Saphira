@@ -364,12 +364,36 @@ class ClaudeBrain:
         try:
             for index, provider in enumerate(providers):
                 try:
-                    assistant_content = self._consume_provider(
-                        provider, on_sentence, on_event, cancel_event)
-                    if assistant_content:
-                        self._history.append({"role": "assistant", "content": assistant_content})
-                    self._trim_history()
-                    return
+                    while True:
+                        assistant_content, tool_calls = self._consume_provider(
+                            provider, on_sentence, on_event, cancel_event)
+                        if assistant_content:
+                            self._history.append({"role": "assistant", "content": assistant_content})
+                        if not tool_calls:
+                            self._trim_history()
+                            return
+
+                        results = []
+                        for call in tool_calls:
+                            if cancel_event.is_set():
+                                raise _TurnCancelled
+                            output = self._tools.execute(call.name, call.inputs)
+                            if cancel_event.is_set():
+                                raise _TurnCancelled
+                            result = ProviderEvent.tool_result(call.tool_use_id, str(output))
+                            if on_event:
+                                on_event(result)
+                            if cancel_event.is_set():
+                                raise _TurnCancelled
+                            results.append({
+                                "type": "tool_result",
+                                "tool_use_id": call.tool_use_id,
+                                "content": str(output),
+                            })
+                        if cancel_event.is_set():
+                            raise _TurnCancelled
+                        self._history.append({"role": "user", "content": results})
+                        self._trim_history()
                 except _TurnCancelled:
                     raise
                 except Exception:
@@ -386,9 +410,10 @@ class ClaudeBrain:
             raise
 
     def _consume_provider(self, provider: LLMProvider, on_sentence, on_event,
-                          cancel_event: threading.Event) -> list[dict]:
+                          cancel_event: threading.Event) -> tuple[list[dict], list[ProviderEvent]]:
         buffer = ""
         assistant_content = []
+        tool_calls = []
 
         def emit_sentence(sentence: str) -> None:
             if cancel_event.is_set():
@@ -437,6 +462,7 @@ class ClaudeBrain:
                         "name": event.name,
                         "input": dict(event.inputs),
                     })
+                    tool_calls.append(event)
                 elif event.type == "end":
                     flush_buffer()
                     if on_event:
@@ -454,7 +480,7 @@ class ClaudeBrain:
             if cancel_event.is_set():
                 raise _TurnCancelled
             flush_buffer()
-            return assistant_content
+            return assistant_content, tool_calls
         except _TurnCancelled:
             raise
 

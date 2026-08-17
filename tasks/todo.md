@@ -20,7 +20,7 @@
 - [x] Task 8: Streaming e tool request do Claude
 - [x] Task 9: Fallback Gemini com contrato equivalente
 - [x] Task 10: Janela de memória em RAM
-- [ ] Task 11: Loop de tools e reinjeção de `tool_result`
+- [x] Task 11: Loop de tools e reinjeção de `tool_result`
 - [ ] Checkpoint: Speech e providers
 
 ## Phase 4: Pipeline e orquestração
