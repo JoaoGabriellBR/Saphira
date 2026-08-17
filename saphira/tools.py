@@ -68,7 +68,7 @@ class WebSearchTool:
         r = self._client.search(query, search_depth="basic", max_results=4, include_answer=True)
         parts = [r.get("answer") or ""]
         parts += [f"- {x.get('title', '')}: {x.get('content', '')[:300]}"
-                  for x in r.get("results", [])]
+                  for x in r.get("results", [])[:4]]
         return "\n".join(p for p in parts if p).strip()[:3000] or "Nenhum resultado encontrado."
 
 

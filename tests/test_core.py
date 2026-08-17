@@ -57,6 +57,54 @@ assert s == ["Um.", "Dois."] and rest == "", (s, rest)
 s, rest = _pop_sentences("sem pontuacao ainda")
 assert s == [] and rest == "sem pontuacao ainda"
 
+# --- WebSearchTool ---
+class FakeTavily:
+    response = {
+        "answer": "resposta atual",
+        "results": [{"title": f"Título {i}", "content": "c" * 400} for i in range(6)],
+    }
+    instances = []
+
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.calls = []
+        self.instances.append(self)
+
+    def search(self, query, **kwargs):
+        self.calls.append((query, kwargs))
+        return self.response
+
+
+old_tavily = tools_module.TavilyClient
+tools_module.TavilyClient = FakeTavily
+try:
+    web = tools_module.WebSearchTool("fake-key")
+    result = web.run("notícias de hoje")
+    assert web._client.calls == [(
+        "notícias de hoje",
+        {"search_depth": "basic", "max_results": 4, "include_answer": True},
+    )]
+    assert "resposta atual" in result
+    assert sum(line.startswith("- ") for line in result.splitlines()) <= 4
+    assert "- Título 0: " in result and "- Título 3: " in result
+    assert "- Título 4: " not in result
+    assert len(result) <= 3000
+
+    FakeTavily.response = {"answer": "", "results": []}
+    assert tools_module.WebSearchTool("fake-key").run("sem resultados") == "Nenhum resultado encontrado."
+
+    class TimeoutTavily(FakeTavily):
+        def search(self, query, **kwargs):
+            raise TimeoutError("timeout Tavily")
+
+    tools_module.TavilyClient = TimeoutTavily
+    registry = ToolRegistry()
+    registry.register(tools_module.WebSearchTool("fake-key"))
+    assert registry.execute("web_search", {"query": "falha"}) == \
+        "Erro ao executar web_search: timeout Tavily"
+finally:
+    tools_module.TavilyClient = old_tavily
+
 # --- LocalCommandTool ---
 plat = "win32" if sys.platform == "win32" else ("darwin" if sys.platform == "darwin" else "linux")
 py = "python" if plat == "win32" else "python3"
