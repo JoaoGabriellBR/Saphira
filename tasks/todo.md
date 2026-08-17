@@ -4,14 +4,14 @@
 
 - [x] Task 1: Configuração e dependências do runtime
 - [x] Task 2: Registry comum de tools
-- [ ] Checkpoint: Foundation
+- [x] Checkpoint: Foundation
 
 ## Phase 2: Tools e áudio
 
 - [x] Task 3: Allowlist de comandos locais
 - [x] Task 4: Busca web via Tavily
 - [x] Task 5: Captura, playback, hotkey e VAD
-- [ ] Checkpoint: Tools e áudio básico
+- [x] Checkpoint: Tools e áudio básico
 
 ## Phase 3: Speech e raciocínio
 
@@ -21,7 +21,7 @@
 - [x] Task 9: Fallback Gemini com contrato equivalente
 - [x] Task 10: Janela de memória em RAM
 - [x] Task 11: Loop de tools e reinjeção de `tool_result`
-- [ ] Checkpoint: Speech e providers
+- [x] Checkpoint: Speech e providers
 
 ## Phase 4: Pipeline e orquestração
 
@@ -31,7 +31,7 @@
 - [x] Task 15: Barge-in com cancelamento e retomada
 - [x] Task 16: Degradação de voz
 - [x] Task 17: Degradação de raciocínio e tools
-- [ ] Checkpoint: Orquestração completa
+- [x] Checkpoint: Orquestração completa
 
 ## Phase 5: Aceite v1
 
