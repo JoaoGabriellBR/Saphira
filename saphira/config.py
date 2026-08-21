@@ -18,8 +18,7 @@ def _req(name: str) -> str:
 
 
 # Obrigatórias
-ELEVENLABS_API_KEY = _req("ELEVENLABS_API_KEY")
-ELEVENLABS_VOICE_ID = _req("ELEVENLABS_VOICE_ID")  # elevenlabs.io → Voice Library → copiar Voice ID
+ELEVENLABS_API_KEY = _req("ELEVENLABS_API_KEY")  # STT (Scribe)
 TAVILY_API_KEY = _req("TAVILY_API_KEY")
 GEMINI_API_KEY = _req("GEMINI_API_KEY")  # fallback LLM — aistudio.google.com → API key
 
@@ -29,8 +28,21 @@ ANTHROPIC_API_KEY = _opt("ANTHROPIC_API_KEY")  # sem ela o Gemini vira o provide
 CLAUDE_MODEL = _opt("CLAUDE_MODEL") or "claude-sonnet-5"
 GEMINI_MODEL = "gemini-3.6-flash"
 STT_MODEL = "scribe_v2"
-TTS_MODEL = "eleven_flash_v2_5"  # troque por "eleven_multilingual_v2" p/ mais expressão (mais latência)
 LANGUAGE = "por"
+
+# TTS Kokoro
+KOKORO_VOICE = _opt("KOKORO_VOICE") or "pf_dora"
+_speed_raw = _opt("KOKORO_SPEED")
+try:
+    KOKORO_SPEED = float(_speed_raw) if _speed_raw else 1.0
+except ValueError:
+    KOKORO_SPEED = 1.0
+
+# Legado / rollback opcional para ElevenLabs TTS
+ELEVENLABS_VOICE_ID = _opt("ELEVENLABS_VOICE_ID")
+TTS_MODEL = "eleven_flash_v2_5"
+
 HOTKEY = _opt("SAPHIRA_HOTKEY") or "<f9>"  # formato pynput, ex.: "<ctrl>+<shift>+space"
 MAX_HISTORY_MESSAGES = 20  # janela deslizante de memória (mensagens, não turnos)
 COMMANDS_FILE = _opt("SAPHIRA_COMMANDS") or "commands.yaml"
+

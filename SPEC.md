@@ -8,12 +8,12 @@
 
 ### 1.1 Objetivos
 
-1. Daemon local em **Python 3.10+**, rodando no **Windows** (SO alvo do v1), que converse em **pt-BR** por voz.
+1. Daemon local em **Python 3.12** (runtime validado no Windows), rodando no **Windows** (SO alvo do v1), que converse em **pt-BR** por voz.
 2. Latência percebida: **< 2 s** sem tool call e **< 4 s** com busca web — início = fim da captura do turno do usuário (silêncio detectado ou tecla solta); fim = **time-to-first-audio** (TTFA), no primeiro chunk de resposta efetivamente tocando. O orçamento é avaliado em p50 e p95 sobre uma janela deslizante das últimas 20 interações, lidos do log.
 3. Ativação por **push-to-talk em modo toggle** (hotkey global, padrão `F9`, configurável via `SAPHIRA_HOTKEY`): 1ª pressionada grava, 2ª envia. Durante a fala da Saphira, o VAD detecta fala nova e inicia **barge-in**: cancela a chamada LLM/tool em andamento e o streaming de TTS, interrompe o playback e permite iniciar a nova gravação imediatamente após o playback parar, com debounce curto de 150–300 ms para evitar falso disparo por eco.
 4. Raciocínio via **Anthropic Claude, `model_id="claude-sonnet-5"` como default** (trocável via `CLAUDE_MODEL`), com tool use atrás de um registry plugável. Se o Claude estiver indisponível, o fallback é o Gemini via `google-genai`, usando `GEMINI_API_KEY` e `model_id="gemini-3.6-flash"`, com o mesmo contrato de streaming, tool use e memória.
 5. Capacidades implementadas como tools atrás de interface única: `web_search` (Tavily) e `local_command` (allowlist em YAML).
-6. Resposta falada via ElevenLabs **`eleven_flash_v2_5`**, sintetizada **frase a frase** em pipeline com o streaming do LLM.
+6. Resposta falada via **Kokoro TTS** (voz padrão **`pf_dora`**, configurável via `KOKORO_VOICE` e velocidade via `KOKORO_SPEED`), sintetizada **frase a frase** em pipeline com o streaming do LLM.
 7. Nenhuma falha de rede/API (Tavily, ElevenLabs, Anthropic ou Gemini) derruba o loop. STT ou TTS fora do ar usa um áudio local pré-gravado com a mensagem “não consegui te ouvir, tenta de novo”. Falha de Tavily ou `local_command` retorna um `tool_result` de erro ao LLM ativo, que informa o usuário por voz. Falha do Claude aciona o fallback Gemini; se Claude e Gemini estiverem indisponíveis, uma mensagem fixa é emitida pelo TTS e, se o TTS também estiver indisponível, usa-se o áudio local.
 
 ### 1.2 Critério de "pronto" (Definition of Done)
@@ -65,7 +65,7 @@ class Tool(Protocol):
 
 - **STT:** PCM s16le 16 kHz mono → `speech_to_text.convert(model_id="scribe_v2", language_code="por")` → string. Gravação < 100 ms descartada (toque acidental); máximo 90 s por turno.
 - **LLM:** system prompt fixo (pt-BR, respostas curtas para serem faladas, catálogo de comandos); Claude é o provedor primário e Gemini é o fallback com o mesmo contrato; streaming com `max_tokens=600`; chunker de frases por regex de pontuação (limitação conhecida e aceita: abreviações tipo "Dr." podem cortar cedo); preâmbulo antes de tool call é falado. Memória = janela deslizante das últimas 20 mensagens, **só em RAM**: cada entrada do array enviado à API conta como uma mensagem (`user`, `assistant` e cada bloco `tool_result`); o corte só pode ocorrer no início de um turno de usuário e nunca entre um `tool_use` e seu `tool_result` correspondente. Se as 20 mais recentes cortarem um par, estende a janela para trás até um início de turno seguro.
-- **TTS:** por frase, `text_to_speech.stream(model_id="eleven_flash_v2_5", output_format="pcm_24000")` → chunks PCM 24 kHz → playback imediato em thread dedicada; ao detectar fala nova via VAD, com debounce de 150–300 ms, o barge-in cancela LLM/tool, streaming de TTS, playback e drena a fila; a nova gravação começa imediatamente após o playback parar.
+- **TTS:** por frase, `Kokoro TTS (lang_code="p", voice="pf_dora")` → tensor convertido para PCM s16le mono 24 kHz → chunks de 4096 bytes → playback imediato em thread dedicada; ao detectar fala nova via VAD, com debounce de 150–300 ms, o barge-in cancela LLM/tool, streaming de TTS, playback e drena a fila; a nova gravação começa imediatamente após o playback parar.
 
 ## 3. Estrutura de pastas e módulos
 
@@ -76,13 +76,14 @@ Saphira/
 │   ├── __init__.py
 │   ├── config.py    # env + defaults; falha rápido se faltar variável
 │   ├── audio.py     # mic (PCM 16 kHz), playback (PCM 24 kHz), Hotkey global, VAD
-│   ├── speech.py    # ElevenLabs: Scribe STT + TTS streaming
+│   ├── speech.py    # STT (ElevenLabs Scribe) + TTS streaming (Kokoro)
 │   ├── tools.py     # Tool (Protocol), ToolRegistry, WebSearchTool, LocalCommandTool
 │   ├── llm.py       # Claude/Gemini: streaming + tool loop + chunker de frases + memória
 │   └── main.py      # orquestrador: loop PTT, barge-in, speaker thread, log de latência
 ├── scripts/ola.py   # script de demo p/ aceite "rodar script"
 └── tests/test_core.py
 ```
+
 
 Entry point: `python -m saphira.main` a partir da raiz do repo.
 

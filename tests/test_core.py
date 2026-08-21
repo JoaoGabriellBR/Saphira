@@ -17,10 +17,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # --- config: valores do v1 e fail-fast sem chaves reais ---
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED = ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "TAVILY_API_KEY", "GEMINI_API_KEY"]
+REQUIRED = ["ELEVENLABS_API_KEY", "TAVILY_API_KEY", "GEMINI_API_KEY"]
 for k in REQUIRED + ["ANTHROPIC_API_KEY"]:
     os.environ[k] = f"test-{k.lower()}"  # setado antes do import: .env não sobrescreve
-for opt in ("CLAUDE_MODEL", "SAPHIRA_HOTKEY"):
+for opt in ("CLAUDE_MODEL", "SAPHIRA_HOTKEY", "KOKORO_VOICE", "KOKORO_SPEED"):
     os.environ.pop(opt, None)
 
 from saphira import config
@@ -29,10 +29,12 @@ assert config.CLAUDE_MODEL == "claude-sonnet-5", config.CLAUDE_MODEL
 assert config.GEMINI_API_KEY == "test-gemini_api_key"
 assert config.GEMINI_MODEL == "gemini-3.6-flash"
 assert config.STT_MODEL == "scribe_v2"
-assert config.TTS_MODEL == "eleven_flash_v2_5"
+assert config.KOKORO_VOICE == "pf_dora"
+assert config.KOKORO_SPEED == 1.0
 assert config.LANGUAGE == "por"
 assert config.HOTKEY == "<f9>"
 assert config.MAX_HISTORY_MESSAGES == 20
+
 
 # qualquer obrigatória ausente -> RuntimeError nomeando a variável e .env.example
 for missing in REQUIRED:
@@ -808,18 +810,12 @@ finally:
     audio_module.sd.RawInputStream = old_monitor_input
 assert monitor_signals == [False, True]
 
-# --- Speech: ElevenLabs fake e fallback local ---
+# --- Speech: ElevenLabs fake (STT) e Kokoro fake (TTS) e fallback local ---
 class FakeSpeechToText:
     def convert(self, **kwargs):
         self.kwargs = kwargs
         self.wav = kwargs["file"].read()
         return type("Response", (), {"text": " texto transcrito "})()
-
-
-class FakeTextToSpeech:
-    def stream(self, **kwargs):
-        self.kwargs = kwargs
-        return iter([b"\x00\x01", b"\x02\x03"])
 
 
 class FakeElevenLabs:
@@ -829,14 +825,36 @@ class FakeElevenLabs:
         self.api_key = api_key
         self.timeout = kwargs.get("timeout")
         self.speech_to_text = FakeSpeechToText()
-        self.text_to_speech = FakeTextToSpeech()
         self.instances.append(self)
+
+
+class FakeKokoroPipeline:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        self.calls = []
+
+    def __call__(self, text, voice="pf_dora", speed=1.0):
+        self.calls.append({"text": text, "voice": voice, "speed": speed})
+        import numpy as np
+        # 2400 amostras a 24 kHz = 100 ms de áudio float32
+        samples = np.linspace(-0.5, 0.5, 2400, dtype=np.float32)
+        yield ("graphemes", "phonemes", samples)
 
 
 old_elevenlabs = speech_module.ElevenLabs
 speech_module.ElevenLabs = FakeElevenLabs
 try:
-    speech = speech_module.Speech("fake-key", "voice", "scribe_v2", "eleven_flash_v2_5", "por")
+    fake_pipeline = FakeKokoroPipeline()
+    speech = speech_module.Speech(
+        "fake-key",
+        voice="pf_dora",
+        stt_model="scribe_v2",
+        speed=1.0,
+        language="por",
+        kokoro_pipeline=fake_pipeline,
+    )
+    # 1. Validação de STT ElevenLabs
     pcm = b"\x01\x02" * 20
     assert speech.transcribe(pcm) == "texto transcrito"
     stt_call = FakeElevenLabs.instances[-1].speech_to_text
@@ -849,15 +867,34 @@ try:
     assert stt_call.kwargs["model_id"] == "scribe_v2"
     assert stt_call.kwargs["language_code"] == "por"
 
-    assert list(speech.synthesize_stream("olá")) == [b"\x00\x01", b"\x02\x03"]
-    assert FakeElevenLabs.instances[-1].text_to_speech.kwargs == {
-        "text": "olá",
-        "voice_id": "voice",
-        "model_id": "eleven_flash_v2_5",
-        "output_format": "pcm_24000",
-    }
+    # 2. Validação de TTS Kokoro
+    chunks = list(speech.synthesize_stream("olá"))
+    assert chunks and all(isinstance(c, bytes) for c in chunks)
+    assert all(len(c) <= 4096 for c in chunks)
+    # 2400 amostras * 2 bytes = 4800 bytes -> chunks [4096, 704]
+    total_bytes = b"".join(chunks)
+    assert len(total_bytes) == 4800
+    assert fake_pipeline.calls[-1] == {"text": "olá", "voice": "pf_dora", "speed": 1.0}
+
+    # 3. Validação de conversão (valores finitos, clipping e shape)
+    class EdgeCaseKokoroPipeline:
+        def __call__(self, text, voice="pf_dora", speed=1.0):
+            import numpy as np
+            edge_samples = np.array([0.0, np.nan, np.inf, -np.inf, 2.0, -2.0, 0.5], dtype=np.float32)
+            yield ("gs", "ps", edge_samples)
+
+    edge_speech = speech_module.Speech("fake-key", kokoro_pipeline=EdgeCaseKokoroPipeline())
+    edge_chunks = list(edge_speech.synthesize_stream("edge"))
+    assert edge_chunks and all(isinstance(c, bytes) for c in edge_chunks)
+    import numpy as np
+    edge_int16 = np.frombuffer(b"".join(edge_chunks), dtype=np.int16)
+    assert len(edge_int16) == 7
+    assert np.all(np.isfinite(edge_int16))
+    assert edge_int16[4] == 32767   # clipped 2.0 -> 1.0 -> 32767
+    assert edge_int16[5] == -32767  # clipped -2.0 -> -1.0 -> -32767
 finally:
     speech_module.ElevenLabs = old_elevenlabs
+
 
 fallback_before = len(FakeElevenLabs.instances)
 fallback_writes = []

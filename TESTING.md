@@ -4,9 +4,9 @@ Este runbook valida o daemon real a partir da raiz do repositório. A aplicaçã
 
 ## Pré-condições
 
-- Windows com Python 3.10 ou superior.
+- Windows com Python 3.12 (runtime validado).
 - Prompt PowerShell aberto em `C:\Users\Jão\Documents\Saphira`.
-- `.env` preenchido na raiz. As quatro variáveis obrigatórias são `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `TAVILY_API_KEY` e `GEMINI_API_KEY`. `ANTHROPIC_API_KEY` é opcional: sem ela o Gemini vira o provider principal.
+- `.env` preenchido na raiz. As três variáveis obrigatórias são `ELEVENLABS_API_KEY` (STT), `TAVILY_API_KEY` e `GEMINI_API_KEY`. `ANTHROPIC_API_KEY` é opcional: sem ela o Gemini vira o provider principal.
 - Dependências instaladas com `python -m pip install -r requirements.txt`.
 - Microfone e saída de áudio funcionais; `sounddevice` usa entrada PCM mono 16 kHz e saída PCM mono 24 kHz.
 - Para `Abra o Spotify`, Spotify instalado e a associação `spotify:` disponível no Windows.
@@ -17,15 +17,18 @@ Variáveis lidas pelo código:
 | Variável | Obrigatória | Default/uso |
 |---|---:|---|
 | `ANTHROPIC_API_KEY` | não | Chave do Claude; sem ela o Gemini vira o provider principal |
-| `ELEVENLABS_API_KEY` | sim | Chave de STT/TTS |
-| `ELEVENLABS_VOICE_ID` | sim | Voz do TTS |
+| `ELEVENLABS_API_KEY` | sim | Chave de STT (Scribe) |
+| `KOKORO_VOICE` | não | Voz do TTS Kokoro (default: `pf_dora`; opções: `pm_alex`, `pm_santa`) |
+| `KOKORO_SPEED` | não | Velocidade do TTS Kokoro (default: `1.0`) |
 | `TAVILY_API_KEY` | sim | Chave de `web_search` |
 | `GEMINI_API_KEY` | sim | Chave do fallback |
 | `CLAUDE_MODEL` | não | `claude-sonnet-5` |
 | `SAPHIRA_HOTKEY` | não | `<f9>` |
 | `SAPHIRA_COMMANDS` | não | `commands.yaml` |
+| `ELEVENLABS_VOICE_ID` | não | Legado / rollback opcional para ElevenLabs TTS |
 
-`GEMINI_MODEL` (`gemini-3.6-flash`), `STT_MODEL` (`scribe_v2`), `TTS_MODEL` (`eleven_flash_v2_5`), `LANGUAGE` (`por`) e `MAX_HISTORY_MESSAGES` (`20`) são constantes em `saphira/config.py`; não são variáveis de ambiente.
+`GEMINI_MODEL` (`gemini-3.6-flash`), `STT_MODEL` (`scribe_v2`), `LANGUAGE` (`por`) e `MAX_HISTORY_MESSAGES` (`20`) são constantes em `saphira/config.py`; não são variáveis de ambiente.
+
 
 ## 1. Subir a aplicação
 
@@ -263,13 +266,14 @@ Não há uma linha explícita `Gemini selecionado`; a resposta falada após o wa
 Com as chaves válidas, em uma nova janela PowerShell execute:
 
 ```powershell
-$env:ELEVENLABS_VOICE_ID = "invalid-voice-id-for-tts-test"
+$env:KOKORO_VOICE = "invalid-voice-id-for-tts-test"
 python -m saphira.main 2>&1 | Tee-Object -FilePath .\saphira-tts-failure.log
 ```
 
-O override só altera o `voice_id` passado ao TTS; o STT continua usando a chave e o modelo válidos. Depois de `Saphira pronta`, faça o smoke test da seção 2.
+O override altera a voz passada ao TTS Kokoro; o STT continua usando a chave ElevenLabs e o modelo válidos. Depois de `Saphira pronta`, faça o smoke test da seção 2.
 
-**Evidência esperada:** o terminal contém `TTS falhou; usando fallback local` e `usando fallback local: não consegui te ouvir, tenta de novo`. O áudio audível deve ser a mensagem gravada no arquivo `saphira/fallback_audio.wav`, não uma nova resposta da ElevenLabs. O daemon deve aceitar outro turno.
+**Evidência esperada:** o terminal contém `TTS falhou; usando fallback local` e `usando fallback local: não consegui te ouvir, tenta de novo`. O áudio audível deve ser a mensagem gravada no arquivo `saphira/fallback_audio.wav`. O daemon deve aceitar outro turno.
+
 
 ### 7.2 Falha de STT isolada
 

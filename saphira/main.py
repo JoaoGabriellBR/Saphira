@@ -262,9 +262,15 @@ def speaker_worker(q: queue.Queue, speech: Speech, interrupt: threading.Event,
 def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    speech = Speech(config.ELEVENLABS_API_KEY, config.ELEVENLABS_VOICE_ID,
-                    config.STT_MODEL, config.TTS_MODEL, config.LANGUAGE)
+    speech = Speech(
+        api_key=config.ELEVENLABS_API_KEY,
+        voice=config.KOKORO_VOICE,
+        stt_model=config.STT_MODEL,
+        speed=config.KOKORO_SPEED,
+        language=config.LANGUAGE,
+    )
     registry = ToolRegistry()
+
     registry.register(WebSearchTool(config.TAVILY_API_KEY))
     commands = LocalCommandTool(config.COMMANDS_FILE)
     registry.register(commands)

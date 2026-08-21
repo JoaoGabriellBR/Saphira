@@ -1,12 +1,15 @@
 # Saphira v1 — rode: pip install -r requirements.txt
-# Versões não pinadas de propósito (APIs mudam rápido); após o primeiro run OK,
-# congele com: pip freeze > requirements-lock.txt
-elevenlabs        # STT (Scribe) + TTS streaming
+# Runtime alvo: Python 3.12 no Windows
+elevenlabs        # STT (Scribe) — ElevenLabs mantido para transcrição
+kokoro            # TTS local (0.9.4+)
+misaki[en]        # G2P / fonemização pt-BR e fallback
+torch             # inferência de tensores Kokoro
 anthropic         # Claude com tool use
 google-genai      # Gemini (fallback LLM)
 tavily-python     # busca web
 sounddevice       # captura/playback de áudio (requer PortAudio no sistema)
-numpy             # dependência do sounddevice
+numpy             # processamento de tensores e buffers de áudio
 pynput            # hotkey global (push-to-talk)
 python-dotenv     # .env
 PyYAML            # commands.yaml
+
