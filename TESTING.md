@@ -6,7 +6,7 @@ Este runbook valida o daemon real a partir da raiz do repositório. A aplicaçã
 
 - Windows com Python 3.10 ou superior.
 - Prompt PowerShell aberto em `C:\Users\Jão\Documents\Saphira`.
-- `.env` preenchido na raiz. As cinco variáveis obrigatórias são `ANTHROPIC_API_KEY`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `TAVILY_API_KEY` e `GEMINI_API_KEY`.
+- `.env` preenchido na raiz. As quatro variáveis obrigatórias são `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `TAVILY_API_KEY` e `GEMINI_API_KEY`. `ANTHROPIC_API_KEY` é opcional: sem ela o Gemini vira o provider principal.
 - Dependências instaladas com `python -m pip install -r requirements.txt`.
 - Microfone e saída de áudio funcionais; `sounddevice` usa entrada PCM mono 16 kHz e saída PCM mono 24 kHz.
 - Para `Abra o Spotify`, Spotify instalado e a associação `spotify:` disponível no Windows.
@@ -16,7 +16,7 @@ Variáveis lidas pelo código:
 
 | Variável | Obrigatória | Default/uso |
 |---|---:|---|
-| `ANTHROPIC_API_KEY` | sim | Chave do Claude |
+| `ANTHROPIC_API_KEY` | não | Chave do Claude; sem ela o Gemini vira o provider principal |
 | `ELEVENLABS_API_KEY` | sim | Chave de STT/TTS |
 | `ELEVENLABS_VOICE_ID` | sim | Voz do TTS |
 | `TAVILY_API_KEY` | sim | Chave de `web_search` |

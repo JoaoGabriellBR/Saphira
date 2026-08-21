@@ -123,7 +123,7 @@ def run_turn(pcm: bytes, speech: Speech, brain: ClaudeBrain,
         log.exception("STT falhou")
         say(speech, "Não consegui te ouvir agora. Tenta de novo?")
         return False
-    if not text:
+    if not text or text == "[silêncio]":
         say(speech, "Não entendi. Pode repetir?")
         return False
     log.info("ouvido: %r", text)
@@ -205,14 +205,17 @@ def run_ptt_loop(speech: Speech, brain: ClaudeBrain, hotkey_event,
 
 
 def build_brain(registry: ToolRegistry, commands: LocalCommandTool) -> ClaudeBrain:
-    fallback = GeminiProvider(config.GEMINI_API_KEY, config.GEMINI_MODEL)
+    gemini = GeminiProvider(config.GEMINI_API_KEY, config.GEMINI_MODEL)
+    if not config.ANTHROPIC_API_KEY:
+        return ClaudeBrain("", config.GEMINI_MODEL, registry, commands.catalog(),
+                           max_history=config.MAX_HISTORY_MESSAGES, provider=gemini)
     return ClaudeBrain(
         config.ANTHROPIC_API_KEY,
         config.CLAUDE_MODEL,
         registry,
         commands.catalog(),
         max_history=config.MAX_HISTORY_MESSAGES,
-        fallback_provider=fallback,
+        fallback_provider=gemini,
     )
 
 

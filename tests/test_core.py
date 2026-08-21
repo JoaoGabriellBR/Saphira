@@ -17,9 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # --- config: valores do v1 e fail-fast sem chaves reais ---
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED = ["ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID",
-            "TAVILY_API_KEY", "GEMINI_API_KEY"]
-for k in REQUIRED:
+REQUIRED = ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "TAVILY_API_KEY", "GEMINI_API_KEY"]
+for k in REQUIRED + ["ANTHROPIC_API_KEY"]:
     os.environ[k] = f"test-{k.lower()}"  # setado antes do import: .env não sobrescreve
 for opt in ("CLAUDE_MODEL", "SAPHIRA_HOTKEY"):
     os.environ.pop(opt, None)
@@ -41,6 +40,21 @@ for missing in REQUIRED:
     r = subprocess.run([sys.executable, "-c", "import saphira.config"],
                        env=env, cwd=tempfile.gettempdir(), capture_output=True, text=True)
     assert r.returncode != 0 and missing in r.stderr and ".env.example" in r.stderr, (missing, r.stderr)
+
+# valor que é só o comentário inline do template (chave não preenchida) -> RuntimeError como ausente
+env = {**os.environ, "GEMINI_API_KEY": "# aistudio.google.com → API key (fallback LLM)",
+       "PYTHONPATH": str(ROOT)}
+r = subprocess.run([sys.executable, "-c", "import saphira.config"],
+                   env=env, cwd=tempfile.gettempdir(), capture_output=True, text=True)
+assert r.returncode != 0 and "GEMINI_API_KEY" in r.stderr, r.stderr
+
+# ANTHROPIC_API_KEY é opcional: só comentário no .env vira "" e o boot segue
+env = {**os.environ, "ANTHROPIC_API_KEY": "# console.anthropic.com → API Keys",
+       "PYTHONPATH": str(ROOT)}
+r = subprocess.run([sys.executable, "-c",
+                    "import saphira.config; print(repr(saphira.config.ANTHROPIC_API_KEY))"],
+                   env=env, cwd=tempfile.gettempdir(), capture_output=True, text=True)
+assert r.returncode == 0 and r.stdout.strip() == "''", (r.returncode, r.stderr)
 
 # dependências declaradas e .env.example sem valores preenchidos
 assert "google-genai" in (ROOT / "requirements.txt").read_text(encoding="utf-8")
@@ -181,6 +195,25 @@ class FakeAnthropic:
         self.instances.append(self)
 
 
+class UnicodeFailingClaudeStream:
+    def __enter__(self):
+        raise UnicodeEncodeError("ascii", "header →", 7, 8, "ordinal not in range(128)")
+
+    def __exit__(self, *args):
+        return False
+
+
+class UnicodeFailingClaudeMessages:
+    def stream(self, **kwargs):
+        return UnicodeFailingClaudeStream()
+
+
+class UnicodeFailingAnthropic:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.messages = UnicodeFailingClaudeMessages()
+
+
 class FakeClaudeTool:
     name = "fake_tool"
     description = "tool de teste"
@@ -297,6 +330,25 @@ assert [event.type for event in gemini.stream(
 )] == ["cancelled"]
 
 
+# --- timeout de rede do fallback Gemini ---
+class CapturingGenaiClient:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.instances.append(self)
+
+
+old_genai_client = llm_module.genai.Client
+llm_module.genai.Client = CapturingGenaiClient
+try:
+    GeminiProvider("fake-gemini-key")
+finally:
+    llm_module.genai.Client = old_genai_client
+
+assert CapturingGenaiClient.instances[-1].kwargs["http_options"]["timeout"] == 60_000
+
+
 # --- failover Claude -> Gemini sem duplicar o user_text ---
 class FailingProvider:
     def __init__(self, detail):
@@ -316,6 +368,23 @@ class SuccessfulProvider:
         self.calls.append(request)
         yield ProviderEvent.text_delta("resposta do fallback")
         yield ProviderEvent.end()
+
+
+old_anthropic = llm_module.anthropic.Anthropic
+llm_module.anthropic.Anthropic = UnicodeFailingAnthropic
+try:
+    unicode_primary = llm_module.AnthropicProvider("fake-key")
+    unicode_fallback = SuccessfulProvider()
+    unicode_brain = ClaudeBrain("unused", "claude-sonnet-5", ToolRegistry(), "catálogo",
+                                provider=unicode_primary, fallback_provider=unicode_fallback)
+    unicode_sentences = []
+    unicode_brain.respond("uma pergunta", unicode_sentences.append)
+finally:
+    llm_module.anthropic.Anthropic = old_anthropic
+
+assert unicode_sentences == ["resposta do fallback"]
+assert len(unicode_fallback.calls) == 1
+assert unicode_fallback.calls[0]["messages"] == [{"role": "user", "content": "uma pergunta"}]
 
 
 primary = FailingProvider("Claude indisponível")
@@ -756,8 +825,9 @@ class FakeTextToSpeech:
 class FakeElevenLabs:
     instances = []
 
-    def __init__(self, api_key):
+    def __init__(self, api_key, **kwargs):
         self.api_key = api_key
+        self.timeout = kwargs.get("timeout")
         self.speech_to_text = FakeSpeechToText()
         self.text_to_speech = FakeTextToSpeech()
         self.instances.append(self)
@@ -770,6 +840,7 @@ try:
     pcm = b"\x01\x02" * 20
     assert speech.transcribe(pcm) == "texto transcrito"
     stt_call = FakeElevenLabs.instances[-1].speech_to_text
+    assert FakeElevenLabs.instances[-1].timeout == 30
     with wave.open(io.BytesIO(stt_call.wav), "rb") as wav:
         assert wav.getnchannels() == 1
         assert wav.getsampwidth() == 2
@@ -1115,6 +1186,32 @@ assert turn_brain.calls == ["resposta transcrita"]
 assert turn_speech.synthesize_calls == ["Resposta factual."]
 assert turn_playback == [b"pcm da resposta"]
 
+
+fallback_turn_provider = SuccessfulProvider()
+fallback_turn_speech = FakeTurnSpeech()
+fallback_turn_playback = []
+old_fallback_turn_play = main_module.audio.play_pcm
+old_anthropic = llm_module.anthropic.Anthropic
+llm_module.anthropic.Anthropic = UnicodeFailingAnthropic
+main_module.audio.play_pcm = lambda chunks, interrupt, on_first_chunk=None: fallback_turn_playback.extend(chunks)
+try:
+    fallback_turn_brain = ClaudeBrain("unused", "claude-sonnet-5", ToolRegistry(), "catálogo",
+                                      fallback_provider=fallback_turn_provider)
+    assert main_module.run_turn(
+        b"pcm" * 1100,
+        fallback_turn_speech,
+        fallback_turn_brain,
+        turn_latency,
+    )
+finally:
+    main_module.audio.play_pcm = old_fallback_turn_play
+    llm_module.anthropic.Anthropic = old_anthropic
+
+assert len(fallback_turn_provider.calls) == 1
+assert fallback_turn_speech.synthesize_calls == ["resposta do fallback"]
+assert fallback_turn_playback == [b"pcm da resposta"]
+
+
 short_speech = FakeTurnSpeech()
 assert not main_module.run_turn(b"x" * 3199, short_speech, FakeTurnBrain(), turn_latency)
 assert short_speech.transcribe_calls == []
@@ -1125,11 +1222,20 @@ main_module.say = lambda speech, text: recoveries.append(text)
 try:
     empty_speech = FakeTurnSpeech(text="")
     failed_speech = FakeTurnSpeech(error=RuntimeError("STT fora do ar"))
+    silence_brain = FakeTurnBrain()
     assert not main_module.run_turn(b"x" * 3200, empty_speech, FakeTurnBrain(), turn_latency)
     assert not main_module.run_turn(b"x" * 3200, failed_speech, FakeTurnBrain(), turn_latency)
+    assert not main_module.run_turn(
+        b"x" * 3200, FakeTurnSpeech(text="[silêncio]"), silence_brain, turn_latency
+    )
 finally:
     main_module.say = old_say
-assert recoveries == ["Não entendi. Pode repetir?", "Não consegui te ouvir agora. Tenta de novo?"]
+assert recoveries == [
+    "Não entendi. Pode repetir?",
+    "Não consegui te ouvir agora. Tenta de novo?",
+    "Não entendi. Pode repetir?",
+]
+assert silence_brain.calls == []
 
 
 class StopPttLoop(Exception):
@@ -1387,6 +1493,22 @@ finally:
 assert configured_brain.kwargs["fallback_provider"] is FakeConfiguredGemini.instances[-1]
 assert configured_brain.kwargs["fallback_provider"].api_key == config.GEMINI_API_KEY
 assert configured_brain.kwargs["fallback_provider"].model == config.GEMINI_MODEL
+
+# sem chave Anthropic: Gemini vira provider principal, sem fallback
+old_anthropic_key = config.ANTHROPIC_API_KEY
+config.ANTHROPIC_API_KEY = ""
+main_module.GeminiProvider = FakeConfiguredGemini
+main_module.ClaudeBrain = FakeConfiguredBrain
+try:
+    gemini_only_brain = main_module.build_brain(ToolRegistry(), FakeCommands())
+finally:
+    config.ANTHROPIC_API_KEY = old_anthropic_key
+    main_module.GeminiProvider = old_main_gemini
+    main_module.ClaudeBrain = old_main_brain
+
+assert gemini_only_brain.kwargs["provider"] is FakeConfiguredGemini.instances[-1]
+assert "fallback_provider" not in gemini_only_brain.kwargs
+assert gemini_only_brain.args[1] == config.GEMINI_MODEL
 
 
 class FailingBrain:

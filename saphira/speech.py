@@ -7,6 +7,7 @@ from pathlib import Path
 from elevenlabs import ElevenLabs
 
 log = logging.getLogger("saphira.speech")
+TTS_TIMEOUT_SECONDS = 30
 
 LOCAL_FALLBACK_MESSAGE = "não consegui te ouvir, tenta de novo"
 LOCAL_FALLBACK_WAV = Path(__file__).with_name("fallback_audio.wav")
@@ -37,7 +38,7 @@ def local_fallback_chunks(chunk_size: int = 4096):
 class Speech:
     def __init__(self, api_key: str, voice_id: str, stt_model: str,
                  tts_model: str, language: str) -> None:
-        self._el = ElevenLabs(api_key=api_key)
+        self._el = ElevenLabs(api_key=api_key, timeout=TTS_TIMEOUT_SECONDS)
         self._voice_id = voice_id
         self._stt_model = stt_model
         self._tts_model = tts_model

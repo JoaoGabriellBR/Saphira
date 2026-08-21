@@ -17,6 +17,7 @@ except ImportError:  # google-genai é carregado só quando o fallback é usado
 from .tools import ToolRegistry
 
 log = logging.getLogger("saphira.llm")
+GEMINI_TIMEOUT_MS = 60_000
 
 
 @dataclass(frozen=True)
@@ -160,7 +161,10 @@ class GeminiProvider:
         if client is not None:
             self._client = client
         elif genai is not None:
-            self._client = genai.Client(api_key=api_key)
+            self._client = genai.Client(
+                api_key=api_key,
+                http_options={"timeout": GEMINI_TIMEOUT_MS},
+            )
         else:
             raise RuntimeError("google-genai não instalado; instale requirements.txt")
 
