@@ -13,14 +13,17 @@ import time
 import wave
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # --- config: valores do v1 e fail-fast sem chaves reais ---
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED = ["ELEVENLABS_API_KEY", "TAVILY_API_KEY", "GEMINI_API_KEY"]
-for k in REQUIRED + ["ANTHROPIC_API_KEY"]:
+REQUIRED = ["TAVILY_API_KEY", "GEMINI_API_KEY"]
+for k in REQUIRED + ["ELEVENLABS_API_KEY", "ANTHROPIC_API_KEY"]:
     os.environ[k] = f"test-{k.lower()}"  # setado antes do import: .env não sobrescreve
-for opt in ("CLAUDE_MODEL", "SAPHIRA_HOTKEY", "KOKORO_VOICE", "KOKORO_SPEED"):
+for opt in ("CLAUDE_MODEL", "SAPHIRA_HOTKEY", "KOKORO_VOICE", "KOKORO_SPEED",
+            "STT_PROVIDER", "WHISPER_MODEL", "WHISPER_DEVICE", "WHISPER_COMPUTE_TYPE"):
     os.environ.pop(opt, None)
 
 from saphira import config
@@ -28,7 +31,11 @@ from saphira import config
 assert config.CLAUDE_MODEL == "claude-sonnet-5", config.CLAUDE_MODEL
 assert config.GEMINI_API_KEY == "test-gemini_api_key"
 assert config.GEMINI_MODEL == "gemini-3.6-flash"
-assert config.STT_MODEL == "scribe_v2"
+assert config.STT_PROVIDER == "faster-whisper"
+assert config.WHISPER_MODEL == "large-v3-turbo"
+assert config.WHISPER_DEVICE == "auto"
+assert config.WHISPER_COMPUTE_TYPE == "auto"
+assert config.STT_MODEL == "large-v3-turbo"
 assert config.KOKORO_VOICE == "pf_dora"
 assert config.KOKORO_SPEED == 1.0
 assert config.LANGUAGE == "por"
@@ -36,12 +43,18 @@ assert config.HOTKEY == "<f9>"
 assert config.MAX_HISTORY_MESSAGES == 20
 
 
-# qualquer obrigatória ausente -> RuntimeError nomeando a variável e .env.example
+# qualquer obrigatória ausente no modo padrão -> RuntimeError nomeando a variável e .env.example
 for missing in REQUIRED:
     env = {**os.environ, missing: "", "PYTHONPATH": str(ROOT)}  # "" impede .env de preencher
     r = subprocess.run([sys.executable, "-c", "import saphira.config"],
                        env=env, cwd=tempfile.gettempdir(), capture_output=True, text=True)
     assert r.returncode != 0 and missing in r.stderr and ".env.example" in r.stderr, (missing, r.stderr)
+
+# no modo elevenlabs, ELEVENLABS_API_KEY é obrigatória
+env = {**os.environ, "STT_PROVIDER": "elevenlabs", "ELEVENLABS_API_KEY": "", "PYTHONPATH": str(ROOT)}
+r = subprocess.run([sys.executable, "-c", "import saphira.config"],
+                   env=env, cwd=tempfile.gettempdir(), capture_output=True, text=True)
+assert r.returncode != 0 and "ELEVENLABS_API_KEY" in r.stderr and ".env.example" in r.stderr, r.stderr
 
 # valor que é só o comentário inline do template (chave não preenchida) -> RuntimeError como ausente
 env = {**os.environ, "GEMINI_API_KEY": "# aistudio.google.com → API key (fallback LLM)",
@@ -59,6 +72,7 @@ r = subprocess.run([sys.executable, "-c",
 assert r.returncode == 0 and r.stdout.strip() == "''", (r.returncode, r.stderr)
 
 # dependências declaradas e .env.example sem valores preenchidos
+assert "faster-whisper" in (ROOT / "requirements.txt").read_text(encoding="utf-8")
 assert "google-genai" in (ROOT / "requirements.txt").read_text(encoding="utf-8")
 for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
     line = line.strip()
@@ -810,7 +824,32 @@ finally:
     audio_module.sd.RawInputStream = old_monitor_input
 assert monitor_signals == [False, True]
 
-# --- Speech: ElevenLabs fake (STT) e Kokoro fake (TTS) e fallback local ---
+# --- Speech: faster-whisper fake (STT), ElevenLabs fake (STT) e Kokoro fake (TTS) e fallback local ---
+class FakeSegment:
+    def __init__(self, text):
+        self.text = text
+
+
+class FakeWhisperModel:
+    instances = []
+
+    def __init__(self, model_size_or_path, device="cpu", compute_type="default", **kwargs):
+        self.model_size_or_path = model_size_or_path
+        self.device = device
+        self.compute_type = compute_type
+        self.kwargs = kwargs
+        self.calls = []
+        self.instances.append(self)
+
+    def transcribe(self, audio, **kwargs):
+        self.calls.append({"audio": audio, "kwargs": kwargs})
+        assert isinstance(audio, np.ndarray), f"Esperado np.ndarray, recebido {type(audio)}"
+        assert audio.dtype == np.float32, f"Esperado float32, recebido {audio.dtype}"
+        segments = [FakeSegment(" texto "), FakeSegment("transcrito pelo whisper")]
+        info = type("TranscriptionInfo", (), {"language": "pt", "language_probability": 0.99})()
+        return iter(segments), info
+
+
 class FakeSpeechToText:
     def convert(self, **kwargs):
         self.kwargs = kwargs
@@ -843,20 +882,44 @@ class FakeKokoroPipeline:
 
 
 old_elevenlabs = speech_module.ElevenLabs
+old_whisper = speech_module.WhisperModel
 speech_module.ElevenLabs = FakeElevenLabs
+speech_module.WhisperModel = FakeWhisperModel
 try:
     fake_pipeline = FakeKokoroPipeline()
-    speech = speech_module.Speech(
+    fake_whisper = FakeWhisperModel("large-v3-turbo")
+
+    # 1. Validação de STT faster-whisper (padrão local)
+    speech_whisper = speech_module.Speech(
+        voice="pf_dora",
+        stt_provider="faster-whisper",
+        stt_model="large-v3-turbo",
+        speed=1.0,
+        language="por",
+        kokoro_pipeline=fake_pipeline,
+        whisper_model=fake_whisper,
+    )
+    pcm = b"\x01\x02" * 20
+    assert speech_whisper.transcribe(pcm) == "texto transcrito pelo whisper"
+    whisper_call = fake_whisper.calls[-1]
+    assert isinstance(whisper_call["audio"], np.ndarray)
+    assert whisper_call["audio"].dtype == np.float32
+    assert len(whisper_call["audio"]) == 20
+    assert whisper_call["kwargs"]["language"] == "pt"
+    assert whisper_call["kwargs"]["beam_size"] == 1
+    assert whisper_call["kwargs"]["vad_filter"] is False
+
+    # 2. Validação de STT ElevenLabs (fallback / opcional)
+    speech_el = speech_module.Speech(
         "fake-key",
         voice="pf_dora",
+        stt_provider="elevenlabs",
         stt_model="scribe_v2",
         speed=1.0,
         language="por",
         kokoro_pipeline=fake_pipeline,
     )
-    # 1. Validação de STT ElevenLabs
-    pcm = b"\x01\x02" * 20
-    assert speech.transcribe(pcm) == "texto transcrito"
+    assert speech_el.transcribe(pcm) == "texto transcrito"
     stt_call = FakeElevenLabs.instances[-1].speech_to_text
     assert FakeElevenLabs.instances[-1].timeout == 30
     with wave.open(io.BytesIO(stt_call.wav), "rb") as wav:
@@ -867,8 +930,30 @@ try:
     assert stt_call.kwargs["model_id"] == "scribe_v2"
     assert stt_call.kwargs["language_code"] == "por"
 
-    # 2. Validação de TTS Kokoro
-    chunks = list(speech.synthesize_stream("olá"))
+    # 3. Validação de inicialização com fallback de CUDA para CPU
+    class CudaFailingWhisperModel:
+        def __init__(self, model_size_or_path, device="cpu", compute_type="default", **kwargs):
+            if device == "cuda":
+                raise RuntimeError("CUDA indisponível (DLL not found)")
+            self.device = device
+            self.compute_type = compute_type
+            self.calls = []
+
+        def transcribe(self, audio, **kwargs):
+            return iter([FakeSegment("transcrito na cpu")]), None
+
+    speech_module.WhisperModel = CudaFailingWhisperModel
+    cuda_speech = speech_module.Speech(
+        stt_provider="faster-whisper",
+        whisper_device="cuda",
+        whisper_compute_type="float16",
+    )
+    assert cuda_speech.transcribe(pcm) == "transcrito na cpu"
+    assert cuda_speech._whisper.device == "cpu"
+    assert cuda_speech._whisper.compute_type == "int8"
+
+    # 4. Validação de TTS Kokoro
+    chunks = list(speech_whisper.synthesize_stream("olá"))
     assert chunks and all(isinstance(c, bytes) for c in chunks)
     assert all(len(c) <= 4096 for c in chunks)
     # 2400 amostras * 2 bytes = 4800 bytes -> chunks [4096, 704]
@@ -876,7 +961,7 @@ try:
     assert len(total_bytes) == 4800
     assert fake_pipeline.calls[-1] == {"text": "olá", "voice": "pf_dora", "speed": 1.0}
 
-    # 3. Validação de conversão (valores finitos, clipping e shape)
+    # 5. Validação de conversão (valores finitos, clipping e shape)
     class EdgeCaseKokoroPipeline:
         def __call__(self, text, voice="pf_dora", speed=1.0):
             import numpy as np
@@ -894,6 +979,7 @@ try:
     assert edge_int16[5] == -32767  # clipped -2.0 -> -1.0 -> -32767
 finally:
     speech_module.ElevenLabs = old_elevenlabs
+    speech_module.WhisperModel = old_whisper
 
 
 fallback_before = len(FakeElevenLabs.instances)

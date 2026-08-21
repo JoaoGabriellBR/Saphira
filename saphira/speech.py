@@ -1,4 +1,4 @@
-"""STT (Scribe) via ElevenLabs e TTS streaming via Kokoro."""
+"""STT (faster-whisper / ElevenLabs) e TTS streaming via Kokoro."""
 import io
 import logging
 import wave
@@ -6,12 +6,21 @@ from pathlib import Path
 from typing import Iterator
 
 import numpy as np
-from elevenlabs import ElevenLabs
+
+try:
+    from elevenlabs import ElevenLabs
+except ImportError:
+    ElevenLabs = None
 
 try:
     from kokoro import KPipeline
 except ImportError:
     KPipeline = None
+
+try:
+    from faster_whisper import WhisperModel
+except ImportError:
+    WhisperModel = None
 
 log = logging.getLogger("saphira.speech")
 TTS_TIMEOUT_SECONDS = 30
@@ -76,14 +85,25 @@ def _convert_audio_to_pcm_chunks(audio, chunk_size: int = TTS_CHUNK_SIZE) -> Ite
 class Speech:
     def __init__(
         self,
-        api_key: str,
+        api_key: str = "",
         voice: str = "pf_dora",
-        stt_model: str = "scribe_v2",
+        stt_provider: str = "faster-whisper",
+        stt_model: str = "large-v3-turbo",
         speed: float = 1.0,
         language: str = "por",
         kokoro_pipeline=None,
+        whisper_model=None,
+        whisper_device: str = "auto",
+        whisper_compute_type: str = "auto",
     ) -> None:
-        self._el = ElevenLabs(api_key=api_key, timeout=TTS_TIMEOUT_SECONDS)
+        self._stt_provider = stt_provider or "faster-whisper"
+        self._api_key = api_key
+        self._el = None
+        if self._stt_provider == "elevenlabs" or (api_key and ElevenLabs is not None):
+            try:
+                self._el = ElevenLabs(api_key=api_key, timeout=TTS_TIMEOUT_SECONDS) if ElevenLabs else None
+            except Exception:
+                log.debug("Cliente ElevenLabs não inicializado.")
         self._voice = voice or "pf_dora"
         self._stt_model = stt_model
         try:
@@ -92,6 +112,9 @@ class Speech:
             self._speed = 1.0
         self._language = language
         self._kokoro = kokoro_pipeline
+        self._whisper = whisper_model
+        self._whisper_device = whisper_device
+        self._whisper_compute_type = whisper_compute_type
 
     def _get_pipeline(self):
         if self._kokoro is None:
@@ -100,14 +123,72 @@ class Speech:
             self._kokoro = KPipeline(lang_code="p")
         return self._kokoro
 
+    def _get_whisper_model(self):
+        if self._whisper is None:
+            if WhisperModel is None:
+                raise RuntimeError("Pacote faster-whisper não está instalado. Instale com: pip install faster-whisper")
+            device = self._whisper_device
+            compute_type = self._whisper_compute_type
+
+            if device == "auto":
+                try:
+                    import torch
+                    has_cuda = torch.cuda.is_available()
+                except Exception:
+                    has_cuda = False
+                device = "cuda" if has_cuda else "cpu"
+
+            if compute_type == "auto":
+                compute_type = "float16" if device == "cuda" else "int8"
+
+            try:
+                log.info("Carregando modelo faster-whisper '%s' (device=%s, compute_type=%s)...",
+                         self._stt_model, device, compute_type)
+                self._whisper = WhisperModel(self._stt_model, device=device, compute_type=compute_type)
+                if device == "cuda":
+                    dummy = np.zeros(8000, dtype=np.float32)
+                    list(self._whisper.transcribe(dummy, language="pt", beam_size=1)[0])
+            except Exception as e:
+                if device == "cuda":
+                    log.warning("Falha ao inicializar faster-whisper em CUDA (%s). Tentando fallback para CPU (int8)...", e)
+                    self._whisper = WhisperModel(self._stt_model, device="cpu", compute_type="int8")
+                else:
+                    raise
+        return self._whisper
+
     def transcribe(self, pcm: bytes, rate: int = 16000) -> str:
-        """Transcreve áudio PCM mono 16 kHz via ElevenLabs Scribe."""
-        resp = self._el.speech_to_text.convert(
-            file=_pcm_to_wav(pcm, rate),
-            model_id=self._stt_model,
-            language_code=self._language,
-        )
-        return (resp.text or "").strip()
+        """Transcreve áudio PCM mono 16 kHz (faster-whisper ou ElevenLabs)."""
+        if self._stt_provider == "faster-whisper":
+            model = self._get_whisper_model()
+            if not isinstance(pcm, np.ndarray):
+                audio_data = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+            else:
+                audio_data = pcm
+
+            lang = "pt" if self._language in ("por", "pt", "portuguese") else self._language
+            segments, _ = model.transcribe(
+                audio_data,
+                language=lang,
+                beam_size=1,
+                temperature=0.0,
+                vad_filter=False,
+            )
+            return "".join(segment.text for segment in segments).strip()
+        elif self._stt_provider == "elevenlabs":
+            if self._el is None:
+                if not self._api_key:
+                    raise RuntimeError("ELEVENLABS_API_KEY necessária para STT ElevenLabs.")
+                if ElevenLabs is None:
+                    raise RuntimeError("Pacote elevenlabs não está instalado.")
+                self._el = ElevenLabs(api_key=self._api_key, timeout=TTS_TIMEOUT_SECONDS)
+            resp = self._el.speech_to_text.convert(
+                file=_pcm_to_wav(pcm, rate),
+                model_id=self._stt_model,
+                language_code=self._language,
+            )
+            return (resp.text or "").strip()
+        else:
+            raise ValueError(f"Provedor de STT desconhecido: {self._stt_provider}")
 
     def synthesize_stream(self, text: str) -> Iterator[bytes]:
         """Sintetiza texto em streaming de chunks PCM mono 16-bit 24 kHz via Kokoro."""

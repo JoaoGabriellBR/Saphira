@@ -265,9 +265,12 @@ def main() -> None:
     speech = Speech(
         api_key=config.ELEVENLABS_API_KEY,
         voice=config.KOKORO_VOICE,
+        stt_provider=config.STT_PROVIDER,
         stt_model=config.STT_MODEL,
         speed=config.KOKORO_SPEED,
         language=config.LANGUAGE,
+        whisper_device=config.WHISPER_DEVICE,
+        whisper_compute_type=config.WHISPER_COMPUTE_TYPE,
     )
     registry = ToolRegistry()
 
