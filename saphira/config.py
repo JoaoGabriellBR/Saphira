@@ -39,7 +39,7 @@ GEMINI_API_KEY = _req("GEMINI_API_KEY")  # fallback LLM — aistudio.google.com 
 ANTHROPIC_API_KEY = _opt("ANTHROPIC_API_KEY")  # sem ela o Gemini vira o provider principal
 # Confirme o id do modelo em https://docs.anthropic.com/en/docs/about-claude/models antes de rodar.
 CLAUDE_MODEL = _opt("CLAUDE_MODEL") or "claude-sonnet-5"
-GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_MODEL = _opt("GEMINI_MODEL") or "gemini-3.6-flash"
 LANGUAGE = _opt("LANGUAGE") or "por"
 
 # TTS Kokoro

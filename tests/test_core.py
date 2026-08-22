@@ -22,9 +22,14 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = ["TAVILY_API_KEY", "GEMINI_API_KEY"]
 for k in REQUIRED + ["ELEVENLABS_API_KEY", "ANTHROPIC_API_KEY"]:
     os.environ[k] = f"test-{k.lower()}"  # setado antes do import: .env não sobrescreve
-for opt in ("CLAUDE_MODEL", "SAPHIRA_HOTKEY", "KOKORO_VOICE", "KOKORO_SPEED",
-            "STT_PROVIDER", "WHISPER_MODEL", "WHISPER_DEVICE", "WHISPER_COMPUTE_TYPE"):
-    os.environ.pop(opt, None)
+os.environ["CLAUDE_MODEL"] = "claude-sonnet-5"
+os.environ["SAPHIRA_HOTKEY"] = "<f9>"
+os.environ["KOKORO_VOICE"] = "pf_dora"
+os.environ["KOKORO_SPEED"] = "1.0"
+os.environ["STT_PROVIDER"] = "faster-whisper"
+os.environ["WHISPER_MODEL"] = "large-v3-turbo"
+os.environ["WHISPER_DEVICE"] = "auto"
+os.environ["WHISPER_COMPUTE_TYPE"] = "auto"
 
 from saphira import config
 
@@ -916,6 +921,8 @@ try:
     assert whisper_call["kwargs"]["language"] == "pt"
     assert whisper_call["kwargs"]["beam_size"] == 1
     assert whisper_call["kwargs"]["vad_filter"] is False
+    assert whisper_call["kwargs"]["no_speech_threshold"] == 0.8
+    assert whisper_call["kwargs"]["condition_on_previous_text"] is False
 
     # 2. Validação de STT ElevenLabs (fallback / opcional)
     speech_el = speech_module.Speech(

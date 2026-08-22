@@ -179,11 +179,24 @@ class GeminiProvider:
             "max_output_tokens": max_tokens,
             "tools": _gemini_tools(tools),
         }
-        chunks = self._client.models.generate_content_stream(
-            model=self._model,
-            contents=_gemini_contents(messages),
-            config=config,
-        )
+        chunks = None
+        for attempt in range(3):
+            if cancel_event.is_set():
+                yield ProviderEvent.cancelled()
+                return
+            try:
+                chunks = self._client.models.generate_content_stream(
+                    model=self._model,
+                    contents=_gemini_contents(messages),
+                    config=config,
+                )
+                break
+            except Exception as exc:
+                if attempt == 2 or cancel_event.is_set() or "503" not in str(exc):
+                    raise
+                log.warning("Gemini sob alta demanda temporária (503). Retentando em 0.6s... (tentativa %d/3)", attempt + 1)
+                time.sleep(0.6)
+
         tool_index = 0
         finish_reason = None
         for chunk in chunks:

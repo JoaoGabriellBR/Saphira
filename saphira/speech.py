@@ -218,6 +218,13 @@ class Speech:
             else:
                 audio_data = pcm
 
+            # Diagnóstico de ganho / amplitude do microfone
+            max_amp = float(np.max(np.abs(audio_data))) if len(audio_data) > 0 else 0.0
+            rms = float(np.sqrt(np.mean(audio_data**2))) if len(audio_data) > 0 else 0.0
+            if max_amp < 0.01:
+                log.warning("Áudio de entrada com volume muito baixo (pico=%.4f, rms=%.4f). Verifique o microfone no Windows.",
+                            max_amp, rms)
+
             lang = "pt" if self._language in ("por", "pt", "portuguese") else self._language
             segments, _ = model.transcribe(
                 audio_data,
@@ -225,8 +232,12 @@ class Speech:
                 beam_size=1,
                 temperature=0.0,
                 vad_filter=False,
+                no_speech_threshold=0.8,
+                condition_on_previous_text=False,
+                initial_prompt="Transcrição de comando de voz em português brasileiro.",
             )
-            return "".join(segment.text for segment in segments).strip()
+            text = "".join(segment.text for segment in segments).strip()
+            return text
         elif self._stt_provider == "elevenlabs":
             if self._el is None:
                 if not self._api_key:
