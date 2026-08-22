@@ -235,6 +235,9 @@ class Speech:
                 no_speech_threshold=0.8,
                 condition_on_previous_text=False,
                 initial_prompt="Transcrição de comando de voz em português brasileiro.",
+                repetition_penalty=1.2,
+                no_repeat_ngram_size=3,
+                hallucination_silence_threshold=2.0,
             )
             text = "".join(segment.text for segment in segments).strip()
             return text

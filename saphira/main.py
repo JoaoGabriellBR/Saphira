@@ -132,8 +132,11 @@ def run_turn(pcm: bytes, speech: Speech, brain: ClaudeBrain,
     interrupt = interrupt or threading.Event()
     barge_in_event = barge_in_event or threading.Event()
     vad_stop = threading.Event()
+    playback_active = threading.Event()
 
     def on_barge_in() -> None:
+        if not playback_active.is_set():
+            return
         interrupt.set()
         barge_in_event.set()
         vad_stop.set()
@@ -149,7 +152,7 @@ def run_turn(pcm: bytes, speech: Speech, brain: ClaudeBrain,
     speaker = threading.Thread(
         target=speaker_worker,
         args=(sentences, speech, interrupt),
-        kwargs={"on_first_audio": latency.first_audio},
+        kwargs={"on_first_audio": latency.first_audio, "playback_active": playback_active},
         daemon=True,
     )
     speaker.start()
@@ -220,7 +223,7 @@ def build_brain(registry: ToolRegistry, commands: LocalCommandTool) -> ClaudeBra
 
 
 def speaker_worker(q: queue.Queue, speech: Speech, interrupt: threading.Event,
-                   on_first_audio=None) -> None:
+                   on_first_audio=None, playback_active: threading.Event | None = None) -> None:
     """Consome frases → sintetiza → toca; sentinela None encerra."""
     first_audio = False
 
@@ -233,10 +236,16 @@ def speaker_worker(q: queue.Queue, speech: Speech, interrupt: threading.Event,
             on_first_audio()
 
     def play(chunks) -> None:
-        if on_first_audio:
-            audio.play_pcm(chunks, interrupt, on_first_chunk=mark_first_audio)
-        else:
-            audio.play_pcm(chunks, interrupt)
+        if playback_active:
+            playback_active.set()
+        try:
+            if on_first_audio:
+                audio.play_pcm(chunks, interrupt, on_first_chunk=mark_first_audio)
+            else:
+                audio.play_pcm(chunks, interrupt)
+        finally:
+            if playback_active:
+                playback_active.clear()
 
     while True:
         sentence = q.get()
@@ -253,10 +262,16 @@ def speaker_worker(q: queue.Queue, speech: Speech, interrupt: threading.Event,
             if interrupt.is_set():
                 continue
             log.exception("TTS falhou; usando fallback local: %r", sentence)
-            play_local_fallback(
-                interrupt,
-                mark_first_audio if on_first_audio else None,
-            )
+            if playback_active:
+                playback_active.set()
+            try:
+                play_local_fallback(
+                    interrupt,
+                    mark_first_audio if on_first_audio else None,
+                )
+            finally:
+                if playback_active:
+                    playback_active.clear()
 
 
 def main() -> None:

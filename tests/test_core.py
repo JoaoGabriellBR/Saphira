@@ -923,6 +923,8 @@ try:
     assert whisper_call["kwargs"]["vad_filter"] is False
     assert whisper_call["kwargs"]["no_speech_threshold"] == 0.8
     assert whisper_call["kwargs"]["condition_on_previous_text"] is False
+    assert whisper_call["kwargs"]["repetition_penalty"] == 1.2
+    assert whisper_call["kwargs"]["no_repeat_ngram_size"] == 3
 
     # 2. Validação de STT ElevenLabs (fallback / opcional)
     speech_el = speech_module.Speech(

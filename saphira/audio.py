@@ -8,7 +8,7 @@ from pynput import keyboard
 
 MIC_RATE = 16000  # Scribe espera s16le 16kHz mono
 TTS_RATE = 24000  # corresponde a output_format="pcm_24000" do TTS
-VAD_THRESHOLD = 500  # ponytail: limiar fixo; calibrar por microfone se houver falsos disparos
+VAD_THRESHOLD = 1500  # ponytail: limiar calibrado para fala real durante playback
 
 log = logging.getLogger("saphira.audio")
 
