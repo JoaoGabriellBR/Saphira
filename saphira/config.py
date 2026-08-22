@@ -3,6 +3,7 @@ import os
 
 from dotenv import load_dotenv
 
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 load_dotenv()
 
 

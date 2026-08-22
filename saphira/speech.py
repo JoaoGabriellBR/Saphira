@@ -1,6 +1,9 @@
 """STT (faster-whisper / ElevenLabs) e TTS streaming via Kokoro."""
 import io
 import logging
+import os
+import shutil
+import sys
 import wave
 from pathlib import Path
 from typing import Iterator
@@ -82,6 +85,30 @@ def _convert_audio_to_pcm_chunks(audio, chunk_size: int = TTS_CHUNK_SIZE) -> Ite
             yield chunk
 
 
+def _setup_espeak_on_windows() -> None:
+    """Configura o espeak-ng com caminho ASCII no Windows para evitar falhas com acentuação."""
+    try:
+        import espeakng_loader
+        from phonemizer.backend.espeak.wrapper import EspeakWrapper
+
+        lib = espeakng_loader.get_library_path()
+        EspeakWrapper.set_library(lib)
+        os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = lib
+
+        public_dir = Path(os.environ.get("PUBLIC", "C:/Users/Public")) / "saphira_espeak"
+        target_data = public_dir / "espeak-ng-data"
+        if not target_data.exists():
+            target_data.mkdir(parents=True, exist_ok=True)
+            src = Path(espeakng_loader.get_data_path())
+            shutil.copytree(src, target_data, dirs_exist_ok=True)
+
+        EspeakWrapper.set_data_path(str(public_dir))
+        os.environ["PHONEMIZER_ESPEAK_DATA_PATH"] = str(public_dir)
+        os.environ["ESPEAK_DATA_PATH"] = str(public_dir)
+    except Exception as e:
+        log.debug("Configuração do espeak-ng no Windows ignorada: %s", e)
+
+
 class Speech:
     def __init__(
         self,
@@ -95,6 +122,8 @@ class Speech:
         whisper_model=None,
         whisper_device: str = "auto",
         whisper_compute_type: str = "auto",
+        elevenlabs_voice_id: str = "",
+        tts_model: str = "eleven_flash_v2_5",
     ) -> None:
         self._stt_provider = stt_provider or "faster-whisper"
         self._api_key = api_key
@@ -115,11 +144,28 @@ class Speech:
         self._whisper = whisper_model
         self._whisper_device = whisper_device
         self._whisper_compute_type = whisper_compute_type
+        self._elevenlabs_voice_id = elevenlabs_voice_id
+        self._tts_model = tts_model
+
+    def preload(self) -> None:
+        """Pré-aquece e carrega os modelos de STT e TTS no startup."""
+        if self._stt_provider == "faster-whisper":
+            try:
+                self._get_whisper_model()
+            except Exception as e:
+                log.warning("Pré-carregamento do faster-whisper falhou: %s", e)
+        if self._kokoro is None and KPipeline is not None:
+            try:
+                self._get_pipeline()
+            except Exception as e:
+                log.warning("Pré-carregamento do Kokoro falhou: %s", e)
 
     def _get_pipeline(self):
         if self._kokoro is None:
             if KPipeline is None:
                 raise RuntimeError("Pacote kokoro não está instalado.")
+            if sys.platform == "win32":
+                _setup_espeak_on_windows()
             self._kokoro = KPipeline(lang_code="p")
         return self._kokoro
 
@@ -131,11 +177,18 @@ class Speech:
             compute_type = self._whisper_compute_type
 
             if device == "auto":
+                has_cuda = False
                 try:
-                    import torch
-                    has_cuda = torch.cuda.is_available()
+                    import ctranslate2
+                    has_cuda = ctranslate2.get_cuda_device_count() > 0
                 except Exception:
-                    has_cuda = False
+                    pass
+                if not has_cuda:
+                    try:
+                        import torch
+                        has_cuda = torch.cuda.is_available()
+                    except Exception:
+                        has_cuda = False
                 device = "cuda" if has_cuda else "cpu"
 
             if compute_type == "auto":
@@ -191,15 +244,41 @@ class Speech:
             raise ValueError(f"Provedor de STT desconhecido: {self._stt_provider}")
 
     def synthesize_stream(self, text: str) -> Iterator[bytes]:
-        """Sintetiza texto em streaming de chunks PCM mono 16-bit 24 kHz via Kokoro."""
-        pipeline = self._get_pipeline()
-        generator = pipeline(text, voice=self._voice, speed=self._speed)
-        for result in generator:
-            audio = getattr(result, "audio", None)
-            if audio is None:
-                if isinstance(result, (tuple, list)) and len(result) >= 3:
-                    audio = result[2]
-                else:
-                    audio = result
-            yield from _convert_audio_to_pcm_chunks(audio, chunk_size=TTS_CHUNK_SIZE)
+        """Sintetiza texto em streaming de chunks PCM mono 16-bit 24 kHz via Kokoro (ou ElevenLabs se Kokoro indisponível)."""
+        kokoro_failed = False
+        try:
+            pipeline = self._get_pipeline()
+            generator = pipeline(text, voice=self._voice, speed=self._speed)
+            for result in generator:
+                audio = getattr(result, "audio", None)
+                if audio is None:
+                    if isinstance(result, (tuple, list)) and len(result) >= 3:
+                        audio = result[2]
+                    else:
+                        audio = result
+                yield from _convert_audio_to_pcm_chunks(audio, chunk_size=TTS_CHUNK_SIZE)
+            return
+        except Exception as e:
+            log.warning("Kokoro indisponível para síntese (%s).", e)
+            kokoro_failed = True
+
+        # Fallback para ElevenLabs TTS se o Kokoro não estiver instalado/disponível
+        if self._el is not None and self._api_key:
+            log.info("Usando fallback ElevenLabs TTS para sintetizar: %r", text)
+            voice_id = self._elevenlabs_voice_id or "21m00Tcm4TlvDq8ikWAM"
+            audio_stream = self._el.text_to_speech.convert_as_stream(
+                voice_id=voice_id,
+                text=text,
+                model_id=self._tts_model,
+                output_format="pcm_24000",
+            )
+            for chunk in audio_stream:
+                if isinstance(chunk, bytes) and chunk:
+                    for i in range(0, len(chunk), TTS_CHUNK_SIZE):
+                        c = chunk[i:i + TTS_CHUNK_SIZE]
+                        if c:
+                            yield c
+            return
+
+        raise RuntimeError("Nenhum motor de TTS disponível (instale o pacote kokoro ou configure ELEVENLABS_API_KEY).")
 

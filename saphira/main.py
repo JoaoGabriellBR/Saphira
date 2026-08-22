@@ -271,7 +271,12 @@ def main() -> None:
         language=config.LANGUAGE,
         whisper_device=config.WHISPER_DEVICE,
         whisper_compute_type=config.WHISPER_COMPUTE_TYPE,
+        elevenlabs_voice_id=config.ELEVENLABS_VOICE_ID,
+        tts_model=config.TTS_MODEL,
     )
+    log.info("Carregando modelos de fala...")
+    speech.preload()
+
     registry = ToolRegistry()
 
     registry.register(WebSearchTool(config.TAVILY_API_KEY))

@@ -857,6 +857,12 @@ class FakeSpeechToText:
         return type("Response", (), {"text": " texto transcrito "})()
 
 
+class FakeTextToSpeech:
+    def convert_as_stream(self, **kwargs):
+        self.kwargs = kwargs
+        return [b"elevenlabs_pcm_chunk_1", b"elevenlabs_pcm_chunk_2"]
+
+
 class FakeElevenLabs:
     instances = []
 
@@ -864,6 +870,7 @@ class FakeElevenLabs:
         self.api_key = api_key
         self.timeout = kwargs.get("timeout")
         self.speech_to_text = FakeSpeechToText()
+        self.text_to_speech = FakeTextToSpeech()
         self.instances.append(self)
 
 
@@ -889,7 +896,7 @@ try:
     fake_pipeline = FakeKokoroPipeline()
     fake_whisper = FakeWhisperModel("large-v3-turbo")
 
-    # 1. Validação de STT faster-whisper (padrão local)
+    # 1. Validação de STT faster-whisper (padrão local) e preload
     speech_whisper = speech_module.Speech(
         voice="pf_dora",
         stt_provider="faster-whisper",
@@ -899,6 +906,7 @@ try:
         kokoro_pipeline=fake_pipeline,
         whisper_model=fake_whisper,
     )
+    speech_whisper.preload()
     pcm = b"\x01\x02" * 20
     assert speech_whisper.transcribe(pcm) == "texto transcrito pelo whisper"
     whisper_call = fake_whisper.calls[-1]
@@ -961,7 +969,22 @@ try:
     assert len(total_bytes) == 4800
     assert fake_pipeline.calls[-1] == {"text": "olá", "voice": "pf_dora", "speed": 1.0}
 
-    # 5. Validação de conversão (valores finitos, clipping e shape)
+    # 5. Validação de fallback para ElevenLabs TTS quando Kokoro não está disponível
+    class FailingKokoroPipeline:
+        def __call__(self, *args, **kwargs):
+            raise RuntimeError("Kokoro indisponível no ambiente")
+
+    tts_el_speech = speech_module.Speech(
+        "fake-key",
+        kokoro_pipeline=FailingKokoroPipeline(),
+        elevenlabs_voice_id="fake_voice_id",
+    )
+    tts_chunks = list(tts_el_speech.synthesize_stream("fallback elevenlabs"))
+    assert tts_chunks == [b"elevenlabs_pcm_chunk_1", b"elevenlabs_pcm_chunk_2"]
+    assert FakeElevenLabs.instances[-1].text_to_speech.kwargs["voice_id"] == "fake_voice_id"
+    assert FakeElevenLabs.instances[-1].text_to_speech.kwargs["text"] == "fallback elevenlabs"
+
+    # 6. Validação de conversão (valores finitos, clipping e shape)
     class EdgeCaseKokoroPipeline:
         def __call__(self, text, voice="pf_dora", speed=1.0):
             import numpy as np
