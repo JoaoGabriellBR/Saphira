@@ -1,7 +1,6 @@
 # SPEC — Saphira v1 (PRD)
 
 - **Data:** 16/ago/2026
-- **Fontes de verdade:** `C:\Users\Jão\Documents\Vault\Projeto Saphira\Saphira — Guia Técnico v1.md` + respostas do interview-me (mesma data)
 - **Status:** aprovado
 
 ## 1. Objetivos e critério de "pronto"

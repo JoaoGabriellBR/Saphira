@@ -5,7 +5,7 @@ Este runbook valida o daemon real a partir da raiz do repositório. A aplicaçã
 ## Pré-condições
 
 - Windows com Python 3.12 (runtime validado).
-- Prompt PowerShell aberto em `C:\Users\Jão\Documents\Saphira`.
+- Prompt PowerShell aberto em `Saphira`.
 - `.env` preenchido na raiz. As três variáveis obrigatórias são `ELEVENLABS_API_KEY` (STT), `TAVILY_API_KEY` e `GEMINI_API_KEY`. `ANTHROPIC_API_KEY` é opcional: sem ela o Gemini vira o provider principal.
 - Dependências instaladas com `python -m pip install -r requirements.txt`.
 - Microfone e saída de áudio funcionais; `sounddevice` usa entrada PCM mono 16 kHz e saída PCM mono 24 kHz.
